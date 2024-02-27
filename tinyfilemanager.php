@@ -167,11 +167,18 @@ $ext_language = array(
 // Note: configure the proxy for the URLs the server is allowed to reach.
 //$proxyServer = 'proxy.url.tld:8080';
 
+// OpenAFS / AuriStor support. Enable this in config.php on an AFS-backed host.
+$afsSupport = false;
+
 // if User has the external config file, try to use it to override the default config above [config.php]
 // sample config - https://tinyfilemanager.github.io/config-sample.txt
 $config_file = __DIR__ . '/config.php';
 if (is_readable($config_file)) {
     @include($config_file);
+}
+
+if ($afsSupport) {
+    require_once __DIR__ . '/afs.php';
 }
 
 define('ACE_FONTSIZE', isset($ace_fontsize) ? $ace_fontsize : 12);
@@ -1296,8 +1303,8 @@ if (isset($_POST['unzip'], $_POST['token']) && !FM_READONLY) {
     fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
 }
 
-// Change Perms (not for Windows)
-if (isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !FM_IS_WIN) {
+// Change POSIX permissions (not for Windows or AFS)
+if (!$afsSupport && isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !FM_IS_WIN) {
 
     if (!verifyToken($_POST['token'])) {
         fm_set_msg(lng("Invalid Token."), 'error');
@@ -1353,6 +1360,41 @@ if (isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !FM_IS_WIN) {
         fm_set_msg(lng('Permissions not changed'), 'error');
     }
 
+    $FM_PATH = FM_PATH;
+    fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
+}
+
+// Change AFS ACLs (not for Windows)
+if ($afsSupport && isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !FM_IS_WIN) {
+    if (!verifyToken($_POST['token'])) {
+        fm_set_msg(lng('Invalid Token.'), 'error');
+        die('Invalid Token.');
+    }
+
+    $path = FM_ROOT_PATH;
+    if (FM_PATH != '') {
+        $path .= '/' . FM_PATH;
+    }
+
+    $file = fm_clean_path($_POST['chmod']);
+    $file = str_replace('/', '', $file);
+    if ($file == '' || (!is_file($path . '/' . $file) && !is_dir($path . '/' . $file))) {
+        fm_set_msg(lng('File not found'), 'error');
+        $FM_PATH = FM_PATH;
+        fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
+    }
+
+    $ret = true;
+    if (isset($_POST['normal']) && is_array($_POST['normal'])) {
+        foreach ($_POST['normal'] as $user => $perms) {
+            $afs = new Afs($path . '/' . $file);
+            unset($perms['acl']);
+            $newAcl = empty($perms) ? 'none' : implode('', array_keys($perms));
+            $ret = $ret && $afs->changeAcl($user, $newAcl, $path . '/' . $file);
+        }
+    }
+
+    fm_set_msg(lng($ret ? 'Permissions changed' : 'Permissions not changed'), $ret ? 'ok' : 'error');
     $FM_PATH = FM_PATH;
     fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
 }
@@ -2061,8 +2103,8 @@ if (isset($_GET['edit']) && !FM_READONLY) {
     exit;
 }
 
-// chmod (not for Windows)
-if (isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
+// chmod (not for Windows or AFS)
+if (!$afsSupport && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
     $file = $_GET['chmod'];
     $file = fm_clean_path($file);
     $file = str_replace('/', '', $file);
@@ -2135,6 +2177,88 @@ if (isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
     exit;
 }
 
+// Edit AFS ACLs (not for Windows)
+if ($afsSupport && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
+    $file = fm_clean_path($_GET['chmod']);
+    $file = str_replace('/', '', $file);
+    if ($file == '' || (!is_file($path . '/' . $file) && !is_dir($path . '/' . $file))) {
+        fm_set_msg(lng('File not found'), 'error');
+        $FM_PATH = FM_PATH;
+        fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
+    }
+
+    fm_show_header();
+    fm_show_nav_path(FM_PATH);
+
+    $file_path = $path . '/' . $file;
+    $afs = new Afs($file_path);
+    $mode = $afs->readAcl($file_path);
+    $normal_acl = is_array($mode) && isset($mode['normal']) ? $mode['normal'] : array();
+    $negative_acl = is_array($mode) && isset($mode['negative']) ? $mode['negative'] : array();
+?>
+    <div class="path">
+        <div class="card mb-2" data-bs-theme="<?php echo FM_THEME; ?>">
+            <h6 class="card-header"><?php echo lng('ChangePermissions') ?></h6>
+            <div class="card-body">
+                <p class="card-text">
+                    <?php $display_path = fm_get_display_path($file_path); ?>
+                    <?php echo $display_path['label']; ?>: <?php echo fm_enc($display_path['path']); ?><br>
+                </p>
+                <form action="" method="post">
+                    <input type="hidden" name="p" value="<?php echo fm_enc(FM_PATH) ?>">
+                    <input type="hidden" name="chmod" value="<?php echo fm_enc($file) ?>">
+                    <input type="hidden" name="token" value="<?php echo fm_enc($_SESSION['token']); ?>">
+                    <table class="table compact-table" data-bs-theme="<?php echo FM_THEME; ?>">
+                        <tr>
+                            <td><b><?php echo lng('User') ?>/<?php echo lng('Group') ?></b></td>
+                            <td><b><?php echo lng('lookup') ?></b></td>
+                            <td><b><?php echo lng('read') ?></b></td>
+                            <td><b><?php echo lng('write') ?></b></td>
+                            <td><b><?php echo lng('insert') ?></b></td>
+                            <td><b><?php echo lng('delete') ?></b></td>
+                            <td><b><?php echo lng('lock') ?></b></td>
+                            <td><b><?php echo lng('admin') ?></b></td>
+                        </tr>
+                        <tr><td colspan="8"><b><?php echo lng('normalRights') ?></b></td></tr>
+                        <?php foreach ($normal_acl as $user => $perms) { $encoded_user = fm_enc($user); ?>
+                            <tr>
+                                <td class="text-end"><b><?php echo $encoded_user; ?></b></td>
+                                <td><input type="hidden" name="normal[<?php echo $encoded_user; ?>][acl]" value=""><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][l]" value="1"<?php echo !empty($perms['l']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][r]" value="1"<?php echo !empty($perms['r']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][w]" value="1"<?php echo !empty($perms['w']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][i]" value="1"<?php echo !empty($perms['i']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][d]" value="1"<?php echo !empty($perms['d']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][k]" value="1"<?php echo !empty($perms['l']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][a]" value="1"<?php echo !empty($perms['a']) ? ' checked' : ''; ?>></label></td>
+                            </tr>
+                        <?php } ?>
+                        <tr><td colspan="8"><b><?php echo lng('negativeRights') ?></b></td></tr>
+                        <?php foreach ($negative_acl as $user => $perms) { $encoded_user = fm_enc($user); ?>
+                            <tr>
+                                <td class="text-end"><b><?php echo $encoded_user; ?></b></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][l]" value="1"<?php echo !empty($perms['l']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][r]" value="1"<?php echo !empty($perms['r']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][w]" value="1"<?php echo !empty($perms['w']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][i]" value="1"<?php echo !empty($perms['i']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][d]" value="1"<?php echo !empty($perms['d']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][k]" value="1"<?php echo !empty($perms['l']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][a]" value="1"<?php echo !empty($perms['a']) ? ' checked' : ''; ?>></label></td>
+                            </tr>
+                        <?php } ?>
+                    </table>
+                    <p>
+                        <b><a href="?p=<?php echo urlencode(FM_PATH) ?>" class="btn btn-outline-primary"><i class="fa fa-times-circle"></i> <?php echo lng('Cancel') ?></a></b>&nbsp;
+                        <button type="submit" class="btn btn-success"><i class="fa fa-check-circle"></i> <?php echo lng('Change') ?></button>
+                    </p>
+                </form>
+            </div>
+        </div>
+    </div>
+<?php
+    fm_show_footer();
+    exit;
+}
+
 // --- TINYFILEMANAGER MAIN ---
 fm_show_header(); // HEADER
 fm_show_nav_path(FM_PATH); // current path
@@ -2145,6 +2269,9 @@ fm_show_message();
 $num_files = count($files);
 $num_folders = count($folders);
 $all_files_size = 0;
+$metadata_column_count = (!FM_IS_WIN && !$hide_Cols) ? ($afsSupport ? 1 : 2) : 0;
+$table_column_count = 4 + $metadata_column_count + (FM_READONLY ? 0 : 1);
+$content_column_count = $table_column_count - (FM_READONLY ? 0 : 1);
 ?>
 <form action="" method="post" class="pt-3">
     <input type="hidden" name="p" value="<?php echo fm_enc(FM_PATH) ?>">
@@ -2166,7 +2293,8 @@ $all_files_size = 0;
                     <th><?php echo lng('Modified') ?></th>
                     <?php if (!FM_IS_WIN && !$hide_Cols): ?>
                         <th><?php echo lng('Perms') ?></th>
-                        <th><?php echo lng('Owner') ?></th><?php endif; ?>
+                        <?php if (!$afsSupport): ?><th><?php echo lng('Owner') ?></th><?php endif; ?>
+                    <?php endif; ?>
                     <th><?php echo lng('Actions') ?></th>
                 </tr>
             </thead>
@@ -2182,7 +2310,7 @@ $all_files_size = 0;
                     <td class="border-0"></td>
                     <?php if (!FM_IS_WIN && !$hide_Cols) { ?>
                         <td class="border-0"></td>
-                        <td class="border-0"></td>
+                        <?php if (!$afsSupport) { ?><td class="border-0"></td><?php } ?>
                     <?php } ?>
                 </tr>
             <?php
@@ -2197,9 +2325,12 @@ $all_files_size = 0;
                 $filesize_raw = "";
                 $filesize = lng('Folder');
                 $perms = substr(decoct(fileperms($path . '/' . $f)), -4);
-                $owner = array('name' => '?'); 
+                $owner = array('name' => '?');
                 $group = array('name' => '?');
-                if (function_exists('posix_getpwuid') && function_exists('posix_getgrgid')) {
+                if ($afsSupport && !FM_IS_WIN && !$hide_Cols) {
+                    $afs = new Afs($path . '/' . $f);
+                    $perms = $afs->getACLAccess($path . '/' . $f);
+                } elseif (!$afsSupport && function_exists('posix_getpwuid') && function_exists('posix_getgrgid')) {
                     try {
                         $owner_id = fileowner($path . '/' . $f);
                         if ($owner_id != 0) {
@@ -2241,9 +2372,9 @@ $all_files_size = 0;
                         <td>
                             <?php if (!FM_READONLY): ?><a title="Change Permissions" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
                         </td>
-                        <td>
+                        <?php if (!$afsSupport): ?><td>
                             <?php echo $owner['name'] . ':' . $group['name'] ?>
-                        </td>
+                        </td><?php endif; ?>
                     <?php endif; ?>
                     <td class="inline-actions"><?php if (!FM_READONLY): ?>
                             <a title="<?php echo lng('Delete') ?>" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;del=<?php echo urlencode($f) ?>" onclick="confirmDialog(event, '1028','<?php echo lng('Delete') . ' ' . lng('Folder'); ?>','<?php echo urlencode($f) ?>', this.href);"> <i class="fa fa-trash-o" aria-hidden="true"></i></a>
@@ -2269,9 +2400,12 @@ $all_files_size = 0;
                 $filelink = '?p=' . urlencode(FM_PATH) . '&amp;view=' . urlencode($f);
                 $all_files_size += $filesize_raw;
                 $perms = substr(decoct(fileperms($path . '/' . $f)), -4);
-                $owner = array('name' => '?'); 
+                $owner = array('name' => '?');
                 $group = array('name' => '?');
-                if (function_exists('posix_getpwuid') && function_exists('posix_getgrgid')) {
+                if ($afsSupport && !FM_IS_WIN && !$hide_Cols) {
+                    $afs = new Afs($path . '/' . $f);
+                    $perms = $afs->getACLAccess($path . '/' . $f);
+                } elseif (!$afsSupport && function_exists('posix_getpwuid') && function_exists('posix_getgrgid')) {
                     try {
                         $owner_id = fileowner($path . '/' . $f);
                         if ($owner_id != 0) {
@@ -2319,7 +2453,7 @@ $all_files_size = 0;
                     <?php if (!FM_IS_WIN && !$hide_Cols): ?>
                         <td><?php if (!FM_READONLY): ?><a title="<?php echo 'Change Permissions' ?>" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
                         </td>
-                        <td><?php echo fm_enc($owner['name'] . ':' . $group['name']) ?></td>
+                        <?php if (!$afsSupport): ?><td><?php echo fm_enc($owner['name'] . ':' . $group['name']) ?></td><?php endif; ?>
                     <?php endif; ?>
                     <td class="inline-actions">
                         <?php if (!FM_READONLY): ?>
@@ -2341,14 +2475,14 @@ $all_files_size = 0;
                 <tfoot>
                     <tr><?php if (!FM_READONLY): ?>
                             <td></td><?php endif; ?>
-                        <td colspan="<?php echo (!FM_IS_WIN && !$hide_Cols) ? '6' : '4' ?>"><em><?php echo lng('Folder is empty') ?></em></td>
+                        <td colspan="<?php echo $content_column_count ?>"><em><?php echo lng('Folder is empty') ?></em></td>
                     </tr>
                 </tfoot>
             <?php
             } else { ?>
                 <tfoot>
                     <tr>
-                        <td class="gray fs-7" colspan="<?php echo (!FM_IS_WIN && !$hide_Cols) ? (FM_READONLY ? '6' : '7') : (FM_READONLY ? '4' : '5') ?>">
+                        <td class="gray fs-7" colspan="<?php echo $table_column_count ?>">
                             <?php echo lng('FullSize') . ': <span class="badge text-bg-light border-radius-0">' . fm_get_filesize($all_files_size) . '</span>' ?>
                             <?php echo lng('File') . ': <span class="badge text-bg-light border-radius-0">' . $num_files . '</span>' ?>
                             <?php echo lng('Folder') . ': <span class="badge text-bg-light border-radius-0">' . $num_folders . '</span>' ?>
@@ -5561,6 +5695,15 @@ function fm_show_header_login()
         $tr['en']['DirectLink']     = 'Direct link';
         $tr['en']['UploadingFiles'] = 'Upload Files';
         $tr['en']['ChangePermissions']  = 'Change Permissions';
+        $tr['en']['lookup']          = 'lookup';
+        $tr['en']['read']            = 'read';
+        $tr['en']['write']           = 'write';
+        $tr['en']['insert']          = 'insert';
+        $tr['en']['delete']          = 'delete';
+        $tr['en']['lock']            = 'lock';
+        $tr['en']['admin']           = 'admin';
+        $tr['en']['normalRights']    = 'Normal Rights';
+        $tr['en']['negativeRights']  = 'Negative Rights';
         $tr['en']['Copying']        = 'Copying';
         $tr['en']['CreateNewItem']  = 'Create New Item';
         $tr['en']['Name']           = 'Name';
