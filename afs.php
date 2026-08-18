@@ -28,6 +28,7 @@ class Afs
 {
     protected $selectedItems;
     protected $afsUtils   = '/usr/bin';
+    protected $afsRoot    = '/afs';
     public  $confirmMsg   = '';
     public  $errorMsg     = '';
     public  $notifyMsg    = '';
@@ -36,6 +37,7 @@ class Afs
     public  $adminPriv    = 0;
     public  $deletePriv   = 0;
     public  $insertPriv   = 0;
+    public  $lockPriv     = 0;
     public  $lookupPriv   = 0;
     public  $readPriv     = 0;
     public  $writePriv    = 0;
@@ -46,37 +48,44 @@ class Afs
     public  $formKey      = '';
     private $uniqname     = '';
     protected $afsStat;
+    protected $afsAvailable = false;
+    protected $lastFsStatus = 0;
     protected $newName    = '';
+    protected $originPath = '';
     protected $startCWD   = '';
 
     public function __construct( $path="" )
     {
-        $this->uniqname = $_SERVER['REMOTE_USER'];
+        $this->uniqname = isset( $_SERVER['REMOTE_USER'] )
+            ? $_SERVER['REMOTE_USER'] : '';
         $this->startCWD = getcwd();
-        $this->afsStat  = stat('/afs/');
+        $this->afsStat  = @stat( $this->afsRoot );
 
         // Bug 2634811 Fixed: Make sure /afs isn't on the local filesystem
-        $rootStat = stat( '/' );
+        $rootStat = @stat( '/' );
 
-        if ( $this->afsStat['dev'] == $rootStat['dev'] ) {
-            error_log( "/afs has same device ID as / " .
+        if ( !is_array( $this->afsStat ) || !is_array( $rootStat )
+          || $this->afsStat['dev'] == $rootStat['dev'] ) {
+            error_log( "$this->afsRoot is unavailable or has the same device ID as / " .
                 "(is afs actually mounted?): $this->uniqname, " .
                 "$this->errorMsg " . __FILE__ );
-            //header( 'Location: /missinghomedir.php' );
-            $this->errorMsg = 'Missing home directory.';
-            return false;
+            $this->errorMsg = 'AFS is not mounted.';
+            return;
         }
 
+        $this->afsAvailable = true;
+
         // Bug 1975875 Fixed: Don't trim whitespaces from path
-        $this->setPath( $path );
+        if ( !$this->setPath( $path )) {
+            return;
+        }
 
         // Generate the path of the folder one level above the current
         if ( !preg_match( "/(.*\/)([^\/]+)\/?$/", $this->path, $Matches )) {
             error_log( "missing homedir: [$this->path] $this->uniqname, " .
                 "$this->errorMsg " . __FILE__ );
-            //header( 'Location: /missinghomedir.php' );
             $this->errorMsg = 'Missing home directory.';
-            return false;
+            return;
         }
         $this->parPath  = $Matches[1];
         $this->filename = $Matches[2];
@@ -87,10 +96,6 @@ class Afs
 
         $this->formKey = $_SESSION['formKey'];
         $this->sid     = md5( uniqid( rand(), true ));
-        ////$this->type    = $this->getType();
-
-        $this->processCommand();
-        $this->getACLAccess( $this->path );
     }
 
 
@@ -110,7 +115,9 @@ class Afs
             $type = @filetype( basename( $this->path ));
 
             if ( $type == 'file' ) {
-                $this->mimetype = Mime::getMimeType( basename( $this->path ));
+                $this->mimetype = function_exists( 'fm_get_mime_type' )
+                    ? fm_get_mime_type( basename( $this->path ))
+                    : 'application/octet-stream';
                 @chdir( $this->startCWD );
                 return $type;
             } else {
@@ -208,7 +215,7 @@ class Afs
                   return false;
             }
 
-            if ( !mkdir( trim( basename( $this->selectedItems )), 0644, true )) {
+            if ( !mkdir( trim( basename( $this->selectedItems )), 0755, true )) {
                 $this->errorMsg = 'Unable to create folder.';
                 @chdir( $this->startCWD );
                 return false;
@@ -243,7 +250,7 @@ class Afs
 
             $itemPath = $folderPath . '/' . $item;
 
-            if ( is_dir( $itemPath ) && !is_link( $itemPath )) {                
+            if ( is_dir( $itemPath ) && !is_link( $itemPath )) {
                 if ( !$this->removeFolder( $itemPath )) {
                     @chdir( $this->startCWD );
                     return false;
@@ -334,7 +341,7 @@ class Afs
         if ( !$this->makePathAFSlocal( $this->path )) {
             return false;
         }
-        
+
         if ( is_link( basename( $this->selectedItems ))) {
             $this->errorMsg = "Symbolic links cannot be renamed.";
             @chdir( $this->startCWD );
@@ -350,8 +357,14 @@ class Afs
             return false;
         }
 
+        if ( !function_exists( 'filedrawers_rename' )) {
+            $this->errorMsg = 'AFS-safe rename support is unavailable.';
+            @chdir( $this->startCWD );
+            return false;
+        }
+
         if ( !@filedrawers_rename( basename( $this->selectedItems ),
-                $newName, '/afs' )) {
+                $newName, $this->afsRoot )) {
             $this->errorMsg = 'Unable to rename this file or folder.';
             @chdir( $this->startCWD );
             return false;
@@ -378,7 +391,12 @@ class Afs
             $sourcePath = $this->originPath . '/' . $file;
             $destPath   = $this->path . '/' . $file;
 
-            if ( !@filedrawers_rename( $sourcePath, $destPath, '/afs' )) {
+            if ( !function_exists( 'filedrawers_rename' )) {
+                $this->errorMsg = 'AFS-safe move support is unavailable.';
+                return false;
+            }
+
+            if ( !@filedrawers_rename( $sourcePath, $destPath, $this->afsRoot )) {
                 $this->errorMsg = "Unable to move: $file.";
                 return false;
             }
@@ -423,6 +441,19 @@ class Afs
      */
     public function copy_dirs( $source, $target )
     {
+        $sourceReal = @realpath( $source );
+        $targetParentReal = @realpath( dirname( $target ));
+        if ( $sourceReal === false || $targetParentReal === false ) {
+            return false;
+        }
+
+        $sourcePrefix = rtrim( $sourceReal, '/' ) . '/';
+        $targetParentPrefix = rtrim( $targetParentReal, '/' ) . '/';
+        if ( $targetParentReal === $sourceReal
+          || strpos( $targetParentPrefix, $sourcePrefix ) === 0 ) {
+            return false;
+        }
+
         if ( !$this->makePathAFSlocal( dirname( $target ))) {
             return false;
         }
@@ -483,6 +514,10 @@ class Afs
      */
     public function copy( $source, $dest )
     {
+        if ( !$this->afsAvailable || !is_array( $this->afsStat )) {
+            return false;
+        }
+
         if ( is_link( $source )) {
             if ( !$this->makePathAFSlocal( dirname( $source ))) {
                 return false;
@@ -496,7 +531,7 @@ class Afs
                 return false;
             }
 
-            if ( !symlink( $target, $name )) {
+            if ( !symlink( $target, basename( $dest ))) {
                 @chdir( $this->startCWD );
                 return false;
             }
@@ -512,32 +547,60 @@ class Afs
 
         $sourceStat = fstat( $sourceHdl );
 
-        if ( $sourceStat['dev'] != $this->afsStat['dev'] ) {
+        if ( !is_array( $sourceStat )
+          || $sourceStat['dev'] != $this->afsStat['dev'] ) {
+            @fclose( $sourceHdl );
             @chdir( $this->startCWD );
             return false;
         }
 
         if ( !$this->makePathAFSlocal( dirname( $dest ))) {
+            @fclose( $sourceHdl );
             @chdir( $this->startCWD );
             return false;
         }
 
         // If you want copy to overwrite, then do unlink(basename($dest)) here
         if ( !( $destHdl = @fopen( basename( $dest ), "xb" ))) {
+            @fclose( $sourceHdl );
             @chdir( $this->startCWD );
             return false;
         }
 
+        $copied = true;
         while ( !feof( $sourceHdl )) {
             $buffer = fread( $sourceHdl, 1024 * 1024 );
-            fwrite( $destHdl, $buffer );
+            if ( $buffer === false ) {
+                $copied = false;
+                break;
+            }
+
+            $written = 0;
+            $length = strlen( $buffer );
+            while ( $written < $length ) {
+                $bytes = fwrite( $destHdl, substr( $buffer, $written ));
+                if ( $bytes === false || $bytes === 0 ) {
+                    $copied = false;
+                    break 2;
+                }
+                $written += $bytes;
+            }
         }
 
+        if ( !@fflush( $destHdl )) {
+            $copied = false;
+        }
         @fclose( $sourceHdl );
-        @fclose( $destHdl );
+        if ( !@fclose( $destHdl )) {
+            $copied = false;
+        }
+
+        if ( !$copied ) {
+            @unlink( basename( $dest ));
+        }
         @chdir( $this->startCWD );
 
-        return true;
+        return $copied;
     }
 
 
@@ -545,19 +608,31 @@ class Afs
     // read files which are hosted in AFS.
     function readfile()
     {
+        if ( !$this->afsAvailable || !is_array( $this->afsStat )) {
+            return false;
+        }
+
         clearstatcache();
 
         if ( $handle = @fopen( $this->path, "rb" )) {
             $stat = fstat( $handle );
-            if ( $stat['dev'] == $this->afsStat['dev'] ) {
+            if ( is_array( $stat ) && $stat['dev'] == $this->afsStat['dev'] ) {
                 while ( !feof( $handle )) {
                     $buffer = fread( $handle, 1024 * 1024 );
+                    if ( $buffer === false ) {
+                        @fclose( $handle );
+                        return false;
+                    }
                     echo $buffer;
                 }
+                @fclose( $handle );
+                return true;
             }
 
             @fclose( $handle );
         }
+
+        return false;
     }
 
     // Change the ACL for a given path
@@ -567,23 +642,94 @@ class Afs
                        $recursive=false,
                        $negative=false )
     {
-        $entity   = escapeshellarg( $entity );
-        $rights   = escapeshellarg( trim( $rights ));
-        $path    = ( $path ) ? $path : $this->path;
-        $neg      = ( $negative ) ? ' -negative' : '';
-        $cmd      = "$this->afsUtils/fs sa $neg " . escapeshellarg( $path ) .
-        " $entity $rights";
-        $cmdRecur = "find " . escapeshellarg( $path ) . " -type d -exec " .
-            "$this->afsUtils/fs sa $neg {} $entity $rights \\;";
-        $cmd      = ( $recursive ) ? $cmdRecur : $cmd;
+        $path = ( $path ) ? $path : $this->path;
+        $path = $this->pathSecurity( $path );
+        $rights = trim( $rights );
 
-        if ( !$path ) {
+        if ( !$path || empty( $entity )
+          || !preg_match( '/^(none|[lrwidkaA-H]{1,15})$/', $rights )) {
+            $this->errorMsg =
+                'Warning: Invalid access control list request.';
             return false;
         }
 
-        if ( strpos( shell_exec( $cmd . " 2>&1" ), 'fs:' ) !== false ) {
+        if ( !$recursive ) {
+            return $this->changeAclEntries(
+                array( $entity => $rights ), $path, $negative );
+        }
+
+        $paths = array( $path );
+        if ( $recursive && is_dir( $path )) {
+            $flags = FilesystemIterator::SKIP_DOTS;
+            $iterator = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator( $path, $flags ),
+                RecursiveIteratorIterator::SELF_FIRST );
+
+            foreach ( $iterator as $item ) {
+                if ( $item->isDir() && !$item->isLink()) {
+                    $safePath = $this->pathSecurity( $item->getPathname());
+                    if ( !$safePath ) {
+                        return false;
+                    }
+                    $paths[] = $safePath;
+                }
+            }
+        }
+
+        foreach ( $paths as $aclPath ) {
+            $arguments = array( 'sa' );
+            if ( $negative ) {
+                $arguments[] = '-negative';
+            }
+            $arguments[] = $aclPath;
+            $arguments[] = $entity;
+            $arguments[] = $rights;
+
+            $result = $this->runFs( $arguments );
+            if ( $result === false || $this->lastFsStatus !== 0
+              || preg_match( '/(^|\n)fs:/', $result )) {
+                $this->errorMsg =
+                    'Warning: Unable to modify the access control list.';
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Change multiple ACL entries in one fs invocation to avoid per-ACE
+    // partial updates and subprocess overhead.
+    function changeAclEntries( $entries, $path='', $negative=false )
+    {
+        $path = ( $path ) ? $path : $this->path;
+        $path = $this->pathSecurity( $path );
+        if ( !$path || !is_array( $entries ) || empty( $entries )) {
+            return false;
+        }
+
+        $arguments = array( 'sa' );
+        if ( $negative ) {
+            $arguments[] = '-negative';
+        }
+        $arguments[] = $path;
+
+        foreach ( $entries as $entity => $rights ) {
+            $rights = trim( $rights );
+            if ( $entity === ''
+              || !preg_match( '/^(none|[lrwidkaA-H]{1,15})$/', $rights )) {
+                $this->errorMsg =
+                    'Warning: Invalid access control list request.';
+                return false;
+            }
+            $arguments[] = $entity;
+            $arguments[] = $rights;
+        }
+
+        $result = $this->runFs( $arguments );
+        if ( $result === false || $this->lastFsStatus !== 0
+          || preg_match( '/(^|\n)fs:/', $result )) {
             $this->errorMsg =
-                "Warning: Unable to modify the access control list.";
+                'Warning: Unable to modify the access control list.';
             return false;
         }
 
@@ -594,94 +740,147 @@ class Afs
     function readAcl( $path='' )
     {
         $path = ( $path ) ? $path : $this->path;
-        $cmd = "$this->afsUtils/fs listacl " . escapeshellarg( $path );
-        $result = shell_exec( $cmd . " 2>&1" );
-        $rights = array( 'l', 'r', 'w', 'i', 'd', 'k', 'a' );
-
+        $path = $this->pathSecurity( $path );
         if ( !$path ) {
             return false;
         }
 
-    if ( preg_match( '/^fs:/', $result )) {
-        $this->errorMsg =
-            "Warning: Unable to read the access control list.";
+        $result = $this->runFs( array( 'listacl', $path ));
+        if ( $result === false || $this->lastFsStatus !== 0
+          || preg_match( '/(^|\n)fs:/', $result )) {
+            $this->errorMsg =
+                'Warning: Unable to read the access control list.';
             return false;
         }
 
-        $result   = preg_replace( "/(.*)is\n(.*)rights:\n/", "", $result );
-        $result   = explode( "\nNegative rights:\n", $result );
-
-        if ( isset( $result[0] )) {
-            $normal = explode( "\n", trim( $result[0] ));
-            if ( is_array( $normal )) {
-                foreach ( $normal as $item ) {
-                    $perm = explode( ' ', trim( $item ));
-                    $setRights = $perm[1];
-                    foreach ( $rights as $right ) {
-                        if ( strpos( $setRights, $right ) !== false ) {
-                            $result['normal'][$perm[0]][$right] = true;
-                        } else {
-                            $result['normal'][$perm[0]][$right] = false;
-                        }
-                    }
-                }
-            }
-        }
-
-        if ( isset( $result[1] )) {
-            $negative = explode( "\n", trim( $result[1] ));
-            if ( is_array( $negative )) {
-                foreach ( $negative as $item ) {
-                    $perm = explode( ' ', trim( $item ));
-                    $setRights = $perm[1];
-                    foreach ( $rights as $right ) {
-                        if ( strpos( $setRights, $right ) !== false ) {
-                            $result['negative'][$perm[0]][$right] = true;
-                        } else {
-                            $result['negative'][$perm[0]][$right] = false;
-                        }
-                    }
-                }
-            }
-        }
-
-        return $result;
+        return $this->parseAclOutput( $result );
     }
 
-    function getACLAccess( $path ) 
+    public function parseAclOutput( $result )
     {
-        if ( empty( $path )) {
+        if ( !is_string( $result )) {
             return false;
         }
 
-        $cmd = "$this->afsUtils/fs getcalleraccess " . escapeshellarg( $path );
-        $result = shell_exec( $cmd . " 2>&1" );
+        $rights = array( 'l', 'r', 'w', 'i', 'd', 'k', 'a',
+            'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H' );
+        $acl = array(
+            'normal' => array(),
+            'negative' => array(),
+            'inherited' => preg_match(
+                '/^Access list \(inherited\) for /mi', $result ) === 1
+        );
+        $section = '';
+        $sawHeader = false;
+        $sawNormal = false;
+        $lines = preg_split( '/\r?\n/', $result );
 
-        $acls = '';
-        if ( preg_match( "/^Callers access to .* is (\w{1,7})$/", 
-                $result, $Matches )) {
-            $acls = strtolower( $Matches[1] );
+        foreach ( $lines as $line ) {
+            $line = trim( $line );
+            if ( $line === '' ) {
+                continue;
+            }
+            if ( preg_match( '/^Access list(?: \(inherited\))? for .+ is$/i', $line )) {
+                $sawHeader = true;
+                continue;
+            }
+            if ( preg_match( '/^Normal rights:$/i', $line )) {
+                $section = 'normal';
+                $sawNormal = true;
+                continue;
+            }
+            if ( preg_match( '/^Negative rights:$/i', $line )) {
+                if ( !$sawNormal ) {
+                    return false;
+                }
+                $section = 'negative';
+                continue;
+            }
+            if ( !$section || !preg_match( '/^(\S+)\s+(\S+)$/', $line, $matches )) {
+                return false;
+            }
+            if ( $matches[2] !== 'none'
+              && !preg_match( '/^[lrwidkaA-H]{1,15}$/', $matches[2] )) {
+                return false;
+            }
 
-            if ( strpos( $acls, 'l' ) !== false ) {
-                $this->lookupPriv = 1;
-                if ( strpos( $acls, 'a' ) !== false ) {
-                    $this->adminPriv = 1;
+            $seenRights = array();
+            foreach ( str_split( $matches[2] ) as $setRight ) {
+                if ( isset( $seenRights[$setRight] )) {
+                    return false;
                 }
-                if ( strpos( $acls, 'd' ) !== false ) {
-                    $this->deletePriv= 1;
-                }
-                if ( strpos( $acls, 'i' ) !== false ) {
-                    $this->insertPriv = 1;
-                }
-                if ( strpos( $acls, 'r' ) !== false ) {
-                    $this->readPriv = 1;
-                }
-                if ( strpos( $acls, 'w' ) !== false ) {
-                    $this->writePriv = 1;
-                }
+                $seenRights[$setRight] = true;
+            }
+
+            foreach ( $rights as $right ) {
+                $acl[$section][$matches[1]][$right] =
+                    strpos( $matches[2], $right ) !== false;
             }
         }
+
+        if ( !$sawHeader || !$sawNormal ) {
+            return false;
+        }
+
+        return $acl;
+    }
+
+    function getACLAccess( $path )
+    {
+        $this->lookupPriv = 0;
+        $this->readPriv = 0;
+        $this->writePriv = 0;
+        $this->insertPriv = 0;
+        $this->deletePriv = 0;
+        $this->lockPriv = 0;
+        $this->adminPriv = 0;
+
+        $path = $this->pathSecurity( $path );
+        if ( !$path ) {
+            return '';
+        }
+
+        $result = $this->runFs( array( 'getcalleraccess', $path ));
+        if ( $result === false || $this->lastFsStatus !== 0 ) {
+            return '';
+        }
+
+        $acls = '';
+        if ( preg_match( '/^Callers access to .* is ([lrwidkaA-H]{1,15})$/m',
+                $result, $Matches )) {
+            $acls = $Matches[1];
+            $this->lookupPriv = strpos( $acls, 'l' ) !== false ? 1 : 0;
+            $this->readPriv   = strpos( $acls, 'r' ) !== false ? 1 : 0;
+            $this->writePriv  = strpos( $acls, 'w' ) !== false ? 1 : 0;
+            $this->insertPriv = strpos( $acls, 'i' ) !== false ? 1 : 0;
+            $this->deletePriv = strpos( $acls, 'd' ) !== false ? 1 : 0;
+            $this->lockPriv   = strpos( $acls, 'k' ) !== false ? 1 : 0;
+            $this->adminPriv  = strpos( $acls, 'a' ) !== false ? 1 : 0;
+        }
         return $acls;
+    }
+
+    protected function runFs( $arguments )
+    {
+        if ( !is_array( $arguments ) || empty( $arguments )) {
+            return false;
+        }
+
+        $command = 'LC_ALL=C ' . escapeshellarg( $this->afsUtils . '/fs' );
+        foreach ( $arguments as $argument ) {
+            $command .= ' ' . escapeshellarg( $argument );
+        }
+
+        if ( !function_exists( 'exec' )) {
+            $this->lastFsStatus = 126;
+            return false;
+        }
+
+        $output = array();
+        $status = 0;
+        exec( $command . ' 2>&1', $output, $status );
+        $this->lastFsStatus = $status;
+        return implode( "\n", $output );
     }
 
     /*
@@ -699,7 +898,7 @@ class Afs
         } else {
             $path = $this->path;
         }
- 
+
         if ( !$this->makePathAFSlocal( $path )) {
             $this->errorMsg = "Unable to view: $this->path.";
             return false;
@@ -805,9 +1004,10 @@ class Afs
      * check only.  To avoid race conditions, other precaustions must be used.
      * CAUTION: This method will be removed in the next major release.
      */
-    private function pathSecurity( $path='' )
+    protected function pathSecurity( $path='' )
     {
-        if ( empty( $path )) {
+        if ( !$this->afsAvailable || empty( $path )
+          || !is_array( $this->afsStat )) {
             return false;
         }
 
@@ -826,25 +1026,30 @@ class Afs
         }
 
         // Remove the final / in the target path if it exists
-        return preg_replace( '/\/$/', '', $path );
+        return rtrim( $path, '/' );
     }
 
 
     public function makePathAFSlocal( $path )
     {
+        if ( !$this->afsAvailable || !is_array( $this->afsStat )) {
+            $this->errorMsg = 'AFS is not mounted.';
+            return false;
+        }
+
         if ( !@chdir( $path )) {
             $this->errorMsg = "Couldn't change directory";
             return false;
         }
 
         clearstatcache();
-        $stat = stat( '.' );
-        if ( $this->afsStat["dev"] != $stat["dev"] ) {
+        $stat = @stat( '.' );
+        if ( !is_array( $stat ) || $this->afsStat['dev'] != $stat['dev'] ) {
             $this->errorMsg = "Path not in AFS";
             @chdir( $this->startCWD );
             return false;
         }
-        
+
         return true;
     }
 
@@ -872,27 +1077,20 @@ class Afs
     // Set the afs path used inside the class
     function setPath( $path='' )
     {
-        if ( $path == '/afs' || $path == '/afs/' ) {
-            $path = null;
+        $safePath = $this->pathSecurity( $path );
+        if ( !$safePath ) {
+            $this->path = '';
+            $this->errorMsg = 'Path not in AFS';
+            return false;
         }
 
-        if ( !empty( $path )) {
-            if ( !( $this->path = $this->pathSecurity( $path ))) {
-                // Can't give this warning due to the current filedrawers
-                // design. This should be fixed in the next release.
-                // If a user navigates to a path that doesn't exist, they will
-                // continue to get the warning until the url changes
-                //$this->errorMsg = "The specified path does not exist. ($path)"
-                $this->path = null;
-            }
-        }
+        $this->path = $safePath;
+        return true;
+    }
 
-        // Make sure the specified path was accepted
-        if ( empty( $this->path )) {
-            //GetHomeDir( $this->uniqname, $this->path, $this->errorMsg );
-            $this->path = $this->pathSecurity( $this->path );
-        }
-
+    public function isAvailable()
+    {
+        return $this->afsAvailable;
     }
 
     // Makes each piece of a file path clickable
@@ -943,6 +1141,7 @@ class Afs
         $retstr .= $this->js_var( "adminPriv", $this->adminPriv);
         $retstr .= $this->js_var( "deletePriv", $this->deletePriv);
         $retstr .= $this->js_var( "insertPriv", $this->insertPriv );
+        $retstr .= $this->js_var( "lockPriv", $this->lockPriv );
         $retstr .= $this->js_var( "readPriv", $this->readPriv );
         $retstr .= $this->js_var( "lookupPriv", $this->lookupPriv );
         $retstr .= $this->js_var( "writePriv", $this->writePriv );
@@ -956,12 +1155,11 @@ class Afs
     {
         $retstr = "";
         $retstr .= "var $varname = " .
-            ( is_string( $contents ) ? 
+            ( is_string( $contents ) ?
                 "'" . $this->escape_js( $contents ) . "'"
-                : $contents ) 
+                : $contents )
             . ";\n";
         return $retstr;
     }
 
 }
-

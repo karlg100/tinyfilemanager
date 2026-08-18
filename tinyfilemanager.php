@@ -1385,13 +1385,61 @@ if ($afsSupport && isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !F
     }
 
     $ret = true;
-    if (isset($_POST['normal']) && is_array($_POST['normal'])) {
-        foreach ($_POST['normal'] as $user => $perms) {
-            $afs = new Afs($path . '/' . $file);
-            unset($perms['acl']);
-            $newAcl = empty($perms) ? 'none' : implode('', array_keys($perms));
-            $ret = $ret && $afs->changeAcl($user, $newAcl, $path . '/' . $file);
+    $aclPath = $path . '/' . $file;
+    $afs = new Afs($aclPath);
+    $currentAcl = $afs->readAcl($aclPath);
+    if (!is_array($currentAcl)) {
+        fm_set_msg(lng('Unable to read the current AFS ACL'), 'error');
+        $FM_PATH = FM_PATH;
+        fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
+    }
+    if (!empty($currentAcl['inherited'])) {
+        fm_set_msg(lng('Inherited AuriStor ACLs are read-only here'), 'error');
+        $FM_PATH = FM_PATH;
+        fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
+    }
+
+    $allowedRights = array('l', 'r', 'w', 'i', 'd', 'k', 'a',
+        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H');
+    $aclSets = array('normal' => false, 'negative' => true);
+    if ((!isset($_POST['normal']) || !is_array($_POST['normal']))
+        && (!isset($_POST['negative']) || !is_array($_POST['negative']))) {
+        fm_set_msg(lng('Permissions not changed'), 'error');
+        $FM_PATH = FM_PATH;
+        fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
+    }
+
+    $aclBatches = array('normal' => array(), 'negative' => array());
+    foreach ($aclSets as $setName => $negative) {
+        if (!isset($_POST[$setName]) || !is_array($_POST[$setName])) {
+            continue;
         }
+
+        foreach ($_POST[$setName] as $user => $perms) {
+            if (!is_array($perms)) {
+                $ret = false;
+                continue;
+            }
+
+            $newAcl = '';
+            foreach ($allowedRights as $right) {
+                if (isset($perms[$right])) {
+                    $newAcl .= $right;
+                }
+            }
+            $newAcl = $newAcl == '' ? 'none' : $newAcl;
+            $aclBatches[$setName][$user] = $newAcl;
+        }
+
+        if (!empty($aclBatches[$setName])) {
+            $changed = $afs->changeAclEntries(
+                $aclBatches[$setName], $aclPath, $negative);
+            $ret = $changed && $ret;
+        }
+    }
+
+    if (empty($aclBatches['normal']) && empty($aclBatches['negative'])) {
+        $ret = false;
     }
 
     fm_set_msg(lng($ret ? 'Permissions changed' : 'Permissions not changed'), $ret ? 'ok' : 'error');
@@ -2193,8 +2241,11 @@ if ($afsSupport && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
     $file_path = $path . '/' . $file;
     $afs = new Afs($file_path);
     $mode = $afs->readAcl($file_path);
-    $normal_acl = is_array($mode) && isset($mode['normal']) ? $mode['normal'] : array();
-    $negative_acl = is_array($mode) && isset($mode['negative']) ? $mode['negative'] : array();
+    $acl_readable = is_array($mode);
+    $normal_acl = $acl_readable && isset($mode['normal']) ? $mode['normal'] : array();
+    $negative_acl = $acl_readable && isset($mode['negative']) ? $mode['negative'] : array();
+    $acl_inherited = $acl_readable && !empty($mode['inherited']);
+    $acl_readonly = !$acl_readable || $acl_inherited;
 ?>
     <div class="path">
         <div class="card mb-2" data-bs-theme="<?php echo FM_THEME; ?>">
@@ -2204,10 +2255,16 @@ if ($afsSupport && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
                     <?php $display_path = fm_get_display_path($file_path); ?>
                     <?php echo $display_path['label']; ?>: <?php echo fm_enc($display_path['path']); ?><br>
                 </p>
+                <?php if (!$acl_readable): ?>
+                    <div class="alert alert-danger"><?php echo lng('Unable to read the current AFS ACL') ?></div>
+                <?php elseif ($acl_inherited): ?>
+                    <div class="alert alert-warning"><?php echo lng('Inherited AuriStor ACLs are read-only here') ?></div>
+                <?php endif; ?>
                 <form action="" method="post">
                     <input type="hidden" name="p" value="<?php echo fm_enc(FM_PATH) ?>">
                     <input type="hidden" name="chmod" value="<?php echo fm_enc($file) ?>">
                     <input type="hidden" name="token" value="<?php echo fm_enc($_SESSION['token']); ?>">
+                    <fieldset<?php echo $acl_readonly ? ' disabled' : ''; ?>>
                     <table class="table compact-table" data-bs-theme="<?php echo FM_THEME; ?>">
                         <tr>
                             <td><b><?php echo lng('User') ?>/<?php echo lng('Group') ?></b></td>
@@ -2218,8 +2275,16 @@ if ($afsSupport && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
                             <td><b><?php echo lng('delete') ?></b></td>
                             <td><b><?php echo lng('lock') ?></b></td>
                             <td><b><?php echo lng('admin') ?></b></td>
+                            <td><b>A</b></td>
+                            <td><b>B</b></td>
+                            <td><b>C</b></td>
+                            <td><b>D</b></td>
+                            <td><b>E</b></td>
+                            <td><b>F</b></td>
+                            <td><b>G</b></td>
+                            <td><b>H</b></td>
                         </tr>
-                        <tr><td colspan="8"><b><?php echo lng('normalRights') ?></b></td></tr>
+                        <tr><td colspan="16"><b><?php echo lng('normalRights') ?></b></td></tr>
                         <?php foreach ($normal_acl as $user => $perms) { $encoded_user = fm_enc($user); ?>
                             <tr>
                                 <td class="text-end"><b><?php echo $encoded_user; ?></b></td>
@@ -2228,27 +2293,44 @@ if ($afsSupport && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
                                 <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][w]" value="1"<?php echo !empty($perms['w']) ? ' checked' : ''; ?>></label></td>
                                 <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][i]" value="1"<?php echo !empty($perms['i']) ? ' checked' : ''; ?>></label></td>
                                 <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][d]" value="1"<?php echo !empty($perms['d']) ? ' checked' : ''; ?>></label></td>
-                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][k]" value="1"<?php echo !empty($perms['l']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][k]" value="1"<?php echo !empty($perms['k']) ? ' checked' : ''; ?>></label></td>
                                 <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][a]" value="1"<?php echo !empty($perms['a']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][A]" value="1"<?php echo !empty($perms['A']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][B]" value="1"<?php echo !empty($perms['B']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][C]" value="1"<?php echo !empty($perms['C']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][D]" value="1"<?php echo !empty($perms['D']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][E]" value="1"<?php echo !empty($perms['E']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][F]" value="1"<?php echo !empty($perms['F']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][G]" value="1"<?php echo !empty($perms['G']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="normal[<?php echo $encoded_user; ?>][H]" value="1"<?php echo !empty($perms['H']) ? ' checked' : ''; ?>></label></td>
                             </tr>
                         <?php } ?>
-                        <tr><td colspan="8"><b><?php echo lng('negativeRights') ?></b></td></tr>
+                        <tr><td colspan="16"><b><?php echo lng('negativeRights') ?></b></td></tr>
                         <?php foreach ($negative_acl as $user => $perms) { $encoded_user = fm_enc($user); ?>
                             <tr>
                                 <td class="text-end"><b><?php echo $encoded_user; ?></b></td>
-                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][l]" value="1"<?php echo !empty($perms['l']) ? ' checked' : ''; ?>></label></td>
+                                <td><input type="hidden" name="negative[<?php echo $encoded_user; ?>][acl]" value=""><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][l]" value="1"<?php echo !empty($perms['l']) ? ' checked' : ''; ?>></label></td>
                                 <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][r]" value="1"<?php echo !empty($perms['r']) ? ' checked' : ''; ?>></label></td>
                                 <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][w]" value="1"<?php echo !empty($perms['w']) ? ' checked' : ''; ?>></label></td>
                                 <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][i]" value="1"<?php echo !empty($perms['i']) ? ' checked' : ''; ?>></label></td>
                                 <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][d]" value="1"<?php echo !empty($perms['d']) ? ' checked' : ''; ?>></label></td>
-                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][k]" value="1"<?php echo !empty($perms['l']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][k]" value="1"<?php echo !empty($perms['k']) ? ' checked' : ''; ?>></label></td>
                                 <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][a]" value="1"<?php echo !empty($perms['a']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][A]" value="1"<?php echo !empty($perms['A']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][B]" value="1"<?php echo !empty($perms['B']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][C]" value="1"<?php echo !empty($perms['C']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][D]" value="1"<?php echo !empty($perms['D']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][E]" value="1"<?php echo !empty($perms['E']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][F]" value="1"<?php echo !empty($perms['F']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][G]" value="1"<?php echo !empty($perms['G']) ? ' checked' : ''; ?>></label></td>
+                                <td><label><input type="checkbox" name="negative[<?php echo $encoded_user; ?>][H]" value="1"<?php echo !empty($perms['H']) ? ' checked' : ''; ?>></label></td>
                             </tr>
                         <?php } ?>
                     </table>
+                    </fieldset>
                     <p>
                         <b><a href="?p=<?php echo urlencode(FM_PATH) ?>" class="btn btn-outline-primary"><i class="fa fa-times-circle"></i> <?php echo lng('Cancel') ?></a></b>&nbsp;
-                        <button type="submit" class="btn btn-success"><i class="fa fa-check-circle"></i> <?php echo lng('Change') ?></button>
+                        <?php if (!$acl_readonly): ?><button type="submit" class="btn btn-success"><i class="fa fa-check-circle"></i> <?php echo lng('Change') ?></button><?php endif; ?>
                     </p>
                 </form>
             </div>
@@ -5704,6 +5786,8 @@ function fm_show_header_login()
         $tr['en']['admin']           = 'admin';
         $tr['en']['normalRights']    = 'Normal Rights';
         $tr['en']['negativeRights']  = 'Negative Rights';
+        $tr['en']['Unable to read the current AFS ACL'] = 'Unable to read the current AFS ACL';
+        $tr['en']['Inherited AuriStor ACLs are read-only here'] = 'Inherited AuriStor ACLs are read-only here';
         $tr['en']['Copying']        = 'Copying';
         $tr['en']['CreateNewItem']  = 'Create New Item';
         $tr['en']['Name']           = 'Name';
