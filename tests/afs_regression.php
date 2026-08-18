@@ -57,6 +57,96 @@ final class AfsFilesystemDouble extends Afs
     }
 }
 
+final class AfsDataPlaneTestDouble extends AfsDataPlane
+{
+    private $testVolumeMounts = array();
+
+    public function __construct()
+    {
+        // configureDataPlane() supplies an offline AFS model.
+    }
+
+    public function configureDataPlane($root, $startCwd)
+    {
+        $stat = stat($root);
+        $this->afsAvailable = true;
+        $this->afsStat = array('dev' => $stat['dev']);
+        $this->startCWD = $startCwd;
+        return $this->initializeDataPlane($root);
+    }
+
+    public function addVolumeMount($path, $target)
+    {
+        $this->testVolumeMounts[$path] = $target;
+        unset($this->volumeMountCache[$path]);
+    }
+
+    public function addKernelMount($path)
+    {
+        $this->kernelMountPoints[$path] = true;
+    }
+
+    protected function loadKernelMountPoints()
+    {
+        return array();
+    }
+
+    protected function probeAfsIdentity($path, $nofollow = false, $fresh = false)
+    {
+        if (!is_array(@lstat($path))) {
+            return false;
+        }
+        $volume = '100';
+        foreach ($this->testVolumeMounts as $mountPath => $target) {
+            if ($path === $mountPath || strpos($path, $mountPath . '/') === 0) {
+                $volume = '200';
+            }
+        }
+        return array('fid' => $volume . '.1.1', 'volume' => $volume);
+    }
+
+    protected function probeAfsVolumeMountPoint($path)
+    {
+        return array_key_exists($path, $this->testVolumeMounts)
+            ? $this->testVolumeMounts[$path] : false;
+    }
+}
+
+final class AfsDataPlaneProbeDouble extends AfsDataPlane
+{
+    private $testResponses = array();
+
+    public function __construct()
+    {
+        // Probe parser tests do not need a live constructor.
+    }
+
+    public function queueResponse($status, $output)
+    {
+        $this->testResponses[] = array($status, $output);
+    }
+
+    public function probeMountForTest($path)
+    {
+        return $this->probeAfsVolumeMountPoint($path);
+    }
+
+    public function probeIdentityForTest($path, $nofollow = false)
+    {
+        return $this->probeAfsIdentity($path, $nofollow, true);
+    }
+
+    protected function runFs($arguments)
+    {
+        if (empty($this->testResponses)) {
+            $this->lastFsStatus = 127;
+            return false;
+        }
+        list($this->lastFsStatus, $output) = array_shift($this->testResponses);
+        return $output;
+    }
+}
+
 $tests = 0;
 
 function check($condition, $message)
@@ -213,6 +303,29 @@ check($afs->commands[count($afs->commands) - 1]
     === array('sa', '/afs/example', 'alice', 'rl', 'system:anyuser', 'l'),
     'batched ACL entries share one fs setacl invocation');
 
+$probe = new AfsDataPlaneProbeDouble();
+$probe->queueResponse(
+    0, "'/afs/example/child' is a mount point for volume '#child.volume'");
+check($probe->probeMountForTest('/afs/example/child') === '#child.volume',
+    'checked fs lsmount output identifies an AFS volume mount point');
+$probe->queueResponse(
+    1, "'/afs/example/ordinary' is not a mount point.");
+check($probe->probeMountForTest('/afs/example/ordinary') === false,
+    'checked fs lsmount error status identifies an ordinary directory');
+$probe->queueResponse(1, 'fs: permission denied');
+check($probe->probeMountForTest('/afs/example/unknown') === null,
+    'an unrecognized lsmount failure remains fail-closed');
+$probe->queueResponse(
+    0, 'File /afs/example/file (536870918.20404.20997) contained in volume 536870918');
+$identity = $probe->probeIdentityForTest('/afs/example/file');
+check($identity === array(
+        'fid' => '536870918.20404.20997',
+        'volume' => '536870918'),
+    'checked fs getfid output records the resolved AFS identity');
+$probe->queueResponse(1, 'fs: path is not in AFS');
+check($probe->probeIdentityForTest('/tmp/not-afs') === false,
+    'failed fs getfid classification rejects a non-AFS path');
+
 $tempRoot = sys_get_temp_dir() . '/tinyfm-afs-test-' . bin2hex(random_bytes(8));
 check(mkdir($tempRoot, 0700), 'creates an isolated test directory');
 $originalCwd = getcwd();
@@ -325,6 +438,176 @@ try {
             'copy dispatcher fails closed for unsupported special files');
     }
 
+    $guardRoot = $tempRoot . '/guard-root';
+    $guardOutside = $tempRoot . '/guard-outside';
+    check(mkdir($guardRoot, 0700) && mkdir($guardOutside, 0700),
+        'creates rooted and outside trees for the data-plane facade');
+    file_put_contents($guardOutside . '/sentinel.txt', 'outside-sentinel');
+
+    $dataPlane = new AfsDataPlaneTestDouble();
+    check($dataPlane->configureDataPlane($guardRoot, $originalCwd) === true,
+        'initializes the offline pathname-policy AFS data-plane preview');
+    check($dataPlane instanceof AfsDataPlaneProvider,
+        'pathname preview implements the reusable provider contract');
+    check($dataPlane->isProductionReady() === false
+        && $dataPlane->getSecurityBoundary() === 'pathname-preview',
+        'pathname preview cannot satisfy the production descriptor boundary');
+    check(AfsDataPlaneProvider::SECURITY_BOUNDARY_DESCRIPTOR_BENEATH_V1
+        === 'descriptor-beneath-v1',
+        'provider contract names the required descriptor-beneath boundary');
+    check($dataPlane->getDataRoot() === realpath($guardRoot),
+        'pins the data-plane boundary to the resolved configured root');
+    check($dataPlane->resolveExistingPath($guardOutside) === false,
+        'rejects an existing path outside the configured root');
+    check($dataPlane->resolveExistingPath(
+        $guardRoot . '/../guard-outside/sentinel.txt') === false,
+        'rejects dot-segment traversal before filesystem access');
+
+    if (function_exists('symlink')) {
+        $leafLink = $guardRoot . '/outside-file-link';
+        $parentLink = $guardRoot . '/outside-dir-link';
+        check(symlink($guardOutside . '/sentinel.txt', $leafLink)
+            && symlink($guardOutside, $parentLink),
+            'creates final and intermediate POSIX symlink escape fixtures');
+        check($dataPlane->resolveExistingPath($leafLink) === false,
+            'rejects a final POSIX symlink instead of following it');
+        check($dataPlane->resolveExistingPath(
+            $parentLink . '/sentinel.txt') === false,
+            'rejects an intermediate POSIX symlink instead of following it');
+        check($dataPlane->writeFile($leafLink, 'changed') === false
+            && file_get_contents($guardOutside . '/sentinel.txt')
+                === 'outside-sentinel',
+            'guarded writes leave a same-device outside symlink target unchanged');
+        $listed = $dataPlane->listDirectory($guardRoot);
+        $linkInfo = $dataPlane->inspectPath($leafLink, true);
+        check(is_array($listed) && in_array('outside-file-link', $listed, true)
+            && is_array($linkInfo) && $linkInfo['type'] === 'link'
+            && $linkInfo['link_target'] === $guardOutside . '/sentinel.txt',
+            'listing exposes a final symlink only as no-follow object metadata');
+        $renamedLink = $guardRoot . '/renamed-outside-file-link';
+        check($dataPlane->renamePath($leafLink, $renamedLink) === true
+            && is_link($renamedLink)
+            && file_get_contents($guardOutside . '/sentinel.txt')
+                === 'outside-sentinel',
+            'rename moves a verified symlink object without traversing it');
+        check($dataPlane->removePath($renamedLink) === true
+            && !is_link($renamedLink)
+            && file_get_contents($guardOutside . '/sentinel.txt')
+                === 'outside-sentinel',
+            'delete unlinks a verified symlink object without touching its target');
+
+        $linkTree = $guardRoot . '/link-tree';
+        check(mkdir($linkTree, 0700)
+            && symlink($guardOutside, $linkTree . '/outside-link'),
+            'creates a recursive-delete tree containing an outside symlink');
+        check($dataPlane->removePath($linkTree) === true
+            && !file_exists($linkTree)
+            && file_get_contents($guardOutside . '/sentinel.txt')
+                === 'outside-sentinel',
+            'recursive delete unlinks nested symlinks without following them');
+    }
+
+    $kernelMount = $guardRoot . '/kernel-mount';
+    check(mkdir($kernelMount, 0700), 'creates a modeled nested kernel mount');
+    $dataPlane->addKernelMount(realpath($kernelMount));
+    check($dataPlane->resolveExistingPath($kernelMount) === false,
+        'rejects a nested kernel mount without using st_dev as a volume model');
+
+    $childVolume = $guardRoot . '/child-volume';
+    check(mkdir($childVolume, 0700), 'creates a modeled child AFS volume root');
+    $dataPlane->addVolumeMount(realpath($childVolume), '#child.volume');
+    $childWork = $childVolume . '/work';
+    check(mkdir($childWork, 0700), 'creates a working directory in the child volume');
+    check($dataPlane->resolveExistingPath($childWork, 'dir')
+        === realpath($childWork),
+        'allows logical navigation beneath a classified child AFS volume');
+    $crossed = $dataPlane->getCrossedVolumeMounts();
+    check(isset($crossed[realpath($childVolume)])
+        && $crossed[realpath($childVolume)]['target'] === '#child.volume',
+        'records the crossed AFS volume target and resolved identity');
+
+    $insideFile = $guardRoot . '/inside.txt';
+    check($dataPlane->createFile($insideFile) === true,
+        'exclusively creates a regular file inside the guarded root');
+    check($dataPlane->createFile($insideFile) === false,
+        'exclusive creation refuses an existing destination');
+    $binary = "\x00guarded\n" . random_bytes(64);
+    check($dataPlane->writeFile($insideFile, $binary) === true,
+        'writes an existing confined file through a validated handle');
+    check($dataPlane->readContents($insideFile) === $binary,
+        'reads exact binary bytes through the same rooted facade');
+    check(is_string($dataPlane->detectMimeType($insideFile))
+        && $dataPlane->detectMimeType($insideFile) !== '',
+        'MIME sampling is provider-owned and returns a checked string');
+
+    $nestedDirectory = $guardRoot . '/new/path/tree';
+    check($dataPlane->makeDirectory($nestedDirectory, true) === true
+        && is_dir($nestedDirectory),
+        'creates and post-validates each missing directory component');
+
+    $importSource = $tempRoot . '/import-source.bin';
+    $importTarget = $nestedDirectory . '/imported.bin';
+    file_put_contents($importSource, 'first-');
+    check($dataPlane->importFile(
+        $importSource, $importTarget, false, false) === true,
+        'imports a local upload-style payload into a guarded target');
+    file_put_contents($importSource, 'second');
+    check($dataPlane->importFile(
+        $importSource, $importTarget, true, true) === true
+        && file_get_contents($importTarget) === 'first-second',
+        'appends a chunk payload through a post-validated AFS handle');
+
+    $copyTarget = $guardRoot . '/inside-copy.txt';
+    check($dataPlane->copyPath($insideFile, $copyTarget, false) === true
+        && file_get_contents($copyTarget) === $binary,
+        'copies a regular file without falling back to PHP copy');
+    $renamedTarget = $guardRoot . '/inside-renamed.txt';
+    check($dataPlane->renamePath($copyTarget, $renamedTarget) === true
+        && !file_exists($copyTarget) && is_file($renamedTarget),
+        'renames and post-validates a confined regular file');
+
+    $childFile = $childWork . '/child.txt';
+    file_put_contents($childFile, 'child-data');
+    $childCopy = $childWork . '/child-copy.txt';
+    check($dataPlane->copyPath($childFile, $childCopy, false) === true
+        && file_get_contents($childCopy) === 'child-data',
+        'permits an operation explicitly started inside a child AFS volume');
+    check($dataPlane->removePath($childCopy) === true
+        && !file_exists($childCopy),
+        'permits deletion of a regular object inside a child AFS volume');
+
+    $recursiveSource = $guardRoot . '/recursive-source';
+    $recursiveMount = $recursiveSource . '/nested-volume';
+    check(mkdir($recursiveSource, 0700)
+        && mkdir($recursiveMount, 0700),
+        'creates a recursive child-volume boundary fixture');
+    file_put_contents($recursiveSource . '/ordinary.txt', 'ordinary');
+    file_put_contents($recursiveMount . '/volume-sentinel.txt', 'volume-data');
+    $dataPlane->addVolumeMount(realpath($recursiveMount), '#nested.volume');
+    $recursiveTarget = $guardRoot . '/recursive-copy';
+    check($dataPlane->copyPath(
+        $recursiveSource, $recursiveTarget, false) === false
+        && !file_exists($recursiveTarget),
+        'recursive copy stops before entering a child AFS volume mount');
+    check($dataPlane->removePath($recursiveSource) === false
+        && file_get_contents($recursiveMount . '/volume-sentinel.txt')
+            === 'volume-data',
+        'recursive delete preflights and leaves a child-volume sentinel intact');
+
+    $searchRootFile = $guardRoot . '/search-hit.txt';
+    file_put_contents($searchRootFile, 'search');
+    file_put_contents($childWork . '/search-hit-child.txt', 'search-child');
+    $searchResults = $dataPlane->searchFiles($guardRoot, 'search-hit');
+    check(is_array($searchResults) && count($searchResults) === 1
+        && $searchResults[0]['name'] === 'search-hit.txt',
+        'recursive search stays in its starting volume and stops at child mounts');
+
+    check($dataPlane->archivesSupported() === false,
+        'archive mutation is explicitly unavailable in guarded AFS mode');
+    check(file_get_contents($guardOutside . '/sentinel.txt')
+        === 'outside-sentinel',
+        'all facade operations leave the outside escape sentinel unchanged');
+
     check($fsAfs->escape_js("a'b\\c\r\n") === "a\\'b\\\\c\\r\\n",
         'JavaScript escaping covers quote, slash, CR, and LF');
 
@@ -333,6 +616,16 @@ try {
     $reflection = new ReflectionClass('Afs');
     foreach ($requiredMethods as $method) {
         check($reflection->hasMethod($method), "retains Afs::$method");
+    }
+    $dataReflection = new ReflectionClass('AfsDataPlane');
+    foreach (array('initializeDataPlane', 'resolveExistingPath', 'inspectPath',
+        'openRead', 'readContents', 'detectMimeType', 'writeFile', 'createFile',
+        'importFile', 'makeDirectory', 'copyPath', 'renamePath', 'removePath',
+        'listDirectory', 'searchFiles', 'readAcl', 'changeAclEntries',
+        'getACLAccess', 'getSecurityBoundary')
+        as $method) {
+        check($dataReflection->hasMethod($method),
+            "retains AfsDataPlane::$method");
     }
 } finally {
     @chdir($originalCwd);

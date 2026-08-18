@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/afs_contract.php';
+
 /*
  * Copyright (c) 2005 - 2009 Regents of The University of Michigan.
  * All Rights Reserved.  See COPYRIGHT.
@@ -49,6 +51,7 @@ class Afs
     private $uniqname     = '';
     protected $afsStat;
     protected $afsAvailable = false;
+    protected $credentialIdentity = '';
     protected $lastFsStatus = 0;
     protected $newName    = '';
     protected $originPath = '';
@@ -58,6 +61,7 @@ class Afs
     {
         $this->uniqname = isset( $_SERVER['REMOTE_USER'] )
             ? $_SERVER['REMOTE_USER'] : '';
+        $this->credentialIdentity = $this->uniqname;
         $this->startCWD = getcwd();
         $this->afsStat  = @stat( $this->afsRoot );
 
@@ -1199,4 +1203,1545 @@ class Afs
         return $retstr;
     }
 
+}
+
+class AfsProductionReadiness
+{
+    const PRODUCTION_PROFILE = 'afs-descriptor-v1';
+
+    const LOCAL_ONLY_CONTENT_SECURITY_POLICY = "default-src 'none'; " .
+        "base-uri 'none'; connect-src 'self'; font-src 'self'; " .
+        "form-action 'self'; frame-ancestors 'none'; frame-src 'none'; " .
+        "img-src 'self' data:; media-src 'self'; object-src 'none'; " .
+        "script-src 'self'; style-src 'self'; worker-src 'self'";
+
+    public static function validateProductionProfile( $state, &$error=null )
+    {
+        $keys = array(
+            'profile', 'afs_enabled', 'external_auth', 'request_identity',
+            'local_auth', 'local_users_empty', 'settings_enabled',
+            'embed_enabled', 'direct_links_enabled',
+            'raw_previews_enabled', 'root_url', 'self_url',
+            'data_root', 'asset_manifest_sha256',
+            'expected_factory_class', 'expected_factory_id',
+            'expected_provider_class', 'expected_provider_id'
+        );
+        if ( !is_array( $state ) || count( $state ) !== count( $keys )
+          || array_diff_key( array_flip( $keys ), $state )
+          || array_diff_key( $state, array_flip( $keys ))) {
+            $error = 'The AFS production profile is missing or malformed.';
+            return false;
+        }
+
+        $fixed = array(
+            'profile' => self::PRODUCTION_PROFILE,
+            'afs_enabled' => true,
+            'external_auth' => true,
+            'local_auth' => false,
+            'local_users_empty' => true,
+            'settings_enabled' => false,
+            'embed_enabled' => false,
+            'direct_links_enabled' => false,
+            'raw_previews_enabled' => false,
+            'root_url' => ''
+        );
+        foreach ( $fixed as $key => $expected ) {
+            if ( $state[$key] !== $expected ) {
+                $error = 'Invalid AFS production profile setting: ' . $key;
+                return false;
+            }
+        }
+
+        if ( !is_string( $state['request_identity'] )
+          || $state['request_identity'] === ''
+          || trim( $state['request_identity'] ) !== $state['request_identity']
+          || preg_match( '/[\x00-\x1f\x7f]/', $state['request_identity'] )) {
+            $error = 'AFS production requires a trusted external identity.';
+            return false;
+        }
+        if ( !is_string( $state['self_url'] )
+          || $state['self_url'] === ''
+          || substr( $state['self_url'], 0, 1 ) !== '/'
+          || strpos( $state['self_url'], '//' ) !== false
+          || preg_match( '/[\x00\r\n?#]/', $state['self_url'] )) {
+            $error = 'AFS production requires a root-relative controller URL.';
+            return false;
+        }
+        if ( !is_string( $state['data_root'] )
+          || strpos( $state['data_root'], '/afs/' ) !== 0
+          || rtrim( $state['data_root'], '/' ) !== $state['data_root']
+          || strpos( $state['data_root'], '\\' ) !== false
+          || preg_match( '/[\x00-\x1f\x7f]/', $state['data_root'] )) {
+            $error = 'AFS production requires one absolute data root below /afs.';
+            return false;
+        }
+        foreach ( explode( '/', substr( $state['data_root'], 5 ))
+                as $segment ) {
+            if ( $segment === '' || $segment === '.' || $segment === '..' ) {
+                $error = 'The AFS production data root is not normalized.';
+                return false;
+            }
+        }
+        if ( !is_string( $state['asset_manifest_sha256'] )
+          || !preg_match( '/^[a-f0-9]{64}$/',
+                $state['asset_manifest_sha256'] )) {
+            $error = 'AFS production requires a lowercase manifest SHA-256.';
+            return false;
+        }
+        foreach ( array(
+                'expected_factory_class', 'expected_factory_id',
+                'expected_provider_class', 'expected_provider_id'
+            ) as $key ) {
+            if ( !is_string( $state[$key] ) || $state[$key] === ''
+              || strlen( $state[$key] ) > 255
+              || !preg_match( '/^[A-Za-z0-9_.:@+\\\\\/-]+$/',
+                    $state[$key] )) {
+                $error = 'Invalid AFS production identity setting: ' . $key;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static function applicationTemplatesSupportStrictCsp()
+    {
+        // Tiny File Manager 2.6 still emits inline script/style blocks and
+        // event-handler attributes. AFS production must remain unavailable
+        // until those templates use reviewed external assets plus nonces or
+        // hashes; accepting unsafe-inline/unsafe-eval is not an alternative.
+        return false;
+    }
+
+    public static function validateContentSecurityPolicy( $policy, &$error=null )
+    {
+        if ( !is_string( $policy ) || trim( $policy ) === '' ) {
+            $error = 'AFS production mode requires a reviewed ' .
+                'Content-Security-Policy.';
+            return false;
+        }
+        if ( preg_match( '/[\x00\r\n]/', $policy )) {
+            $error = 'Invalid Content-Security-Policy configuration.';
+            return false;
+        }
+        if ( $policy !== self::LOCAL_ONLY_CONTENT_SECURITY_POLICY ) {
+            $error = 'The AFS CSP must match the canonical 13-directive ' .
+                'application policy exactly.';
+            return false;
+        }
+
+        $required = array(
+            'default-src', 'base-uri', 'connect-src', 'font-src',
+            'form-action', 'frame-ancestors', 'frame-src', 'img-src',
+            'media-src', 'object-src', 'script-src', 'style-src',
+            'worker-src'
+        );
+        $directives = array();
+        foreach ( explode( ';', $policy ) as $clause ) {
+            $clause = trim( $clause );
+            if ( $clause === '' ) {
+                continue;
+            }
+            $parts = preg_split( '/\s+/', $clause );
+            $name = strtolower( array_shift( $parts ));
+            if ( !preg_match( '/^[a-z][a-z0-9-]*$/', $name )
+              || isset( $directives[$name] )) {
+                $error = 'The CSP contains an invalid or duplicate directive.';
+                return false;
+            }
+            if ( !in_array( $name, $required, true )) {
+                $error = 'The CSP contains an unreviewed directive: ' . $name;
+                return false;
+            }
+            $directives[$name] = $parts;
+        }
+
+        foreach ( $required as $name ) {
+            if ( !isset( $directives[$name] )
+              || empty( $directives[$name] )) {
+                $error = 'The CSP is missing required directive ' . $name . '.';
+                return false;
+            }
+            if ( !self::validateLocalCspSources(
+                    $name, $directives[$name], $error )) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    protected static function validateLocalCspSources( $name, $sources,
+                                                        &$error )
+    {
+        if ( empty( $sources )) {
+            $error = $name . ' must contain at least one CSP source.';
+            return false;
+        }
+        if (( $name === 'object-src' || $name === 'frame-src' )
+          && $sources !== array( "'none'" )) {
+            $error = $name . " must be exactly 'none' in AFS mode.";
+            return false;
+        }
+        if ( in_array( "'none'", $sources, true ) && count( $sources ) !== 1 ) {
+            $error = "'none' cannot be combined with other CSP sources.";
+            return false;
+        }
+
+        foreach ( $sources as $source ) {
+            if ( $source === "'self'" || $source === "'none'" ) {
+                continue;
+            }
+            if ( $source === 'data:'
+              && ( $name === 'img-src' || $name === 'font-src' )) {
+                continue;
+            }
+            if ( preg_match( "/^'(?:nonce-[A-Za-z0-9+\/_-]+=*|sha(?:256|384|512)-[A-Za-z0-9+\/=]+)'$/",
+                    $source )
+              && ( $name === 'script-src' || $name === 'style-src' )) {
+                continue;
+            }
+            $error = 'Remote, wildcard, or unsupported CSP source in ' .
+                $name . ': ' . $source;
+            return false;
+        }
+
+        if ( in_array( $name, array(
+                'default-src', 'script-src', 'style-src', 'img-src',
+                'font-src', 'connect-src', 'media-src', 'base-uri',
+                'form-action', 'worker-src' ), true )
+          && !in_array( "'self'", $sources, true )
+          && !in_array( "'none'", $sources, true )) {
+            $error = $name . " must contain 'self' or 'none'.";
+            return false;
+        }
+        return true;
+    }
+
+    public static function buildLocalAssetTags( $manifest, $assetRoot,
+                                                 &$error=null )
+    {
+        $types = array(
+            'css-bootstrap' => 'style',
+            'css-dropzone' => 'style',
+            'css-font-awesome' => 'style',
+            'css-highlightjs' => 'style',
+            'js-ace' => 'script',
+            'js-bootstrap' => 'script',
+            'js-dropzone' => 'script',
+            'js-jquery' => 'script',
+            'js-jquery-datatables' => 'script',
+            'js-highlightjs' => 'script'
+        );
+        if ( !is_array( $manifest )
+          || count( $manifest ) !== count( $types )
+          || array_diff_key( $manifest, $types )
+          || array_diff_key( $types, $manifest )) {
+            $error = 'The AFS local asset manifest must contain exactly the ' .
+                'required script and style keys.';
+            return false;
+        }
+
+        $tags = array();
+        foreach ( $types as $key => $expectedType ) {
+            $entry = $manifest[$key];
+            if ( !is_array( $entry )) {
+                $error = 'Invalid asset manifest row for ' . $key . '.';
+                return false;
+            }
+            $allowedFields = array(
+                'type' => true, 'path' => true, 'sha256' => true,
+                'license' => true, 'defer' => true
+            );
+            if ( array_diff_key( $entry, $allowedFields )
+              || !isset( $entry['type'], $entry['path'], $entry['sha256'],
+                    $entry['license'], $entry['defer'] )
+              || $entry['type'] !== $expectedType
+              || !is_bool( $entry['defer'] )
+              || ( $expectedType === 'style' && $entry['defer'] !== false )) {
+                $error = 'Invalid typed asset fields for ' . $key . '.';
+                return false;
+            }
+            if ( !in_array( $entry['license'], array(
+                    'MIT', 'BSD-3-Clause', 'Apache-2.0', 'OFL-1.1'
+                ), true )) {
+                $error = 'Unreviewed asset license for ' . $key . '.';
+                return false;
+            }
+            if ( !self::validateLocalAsset(
+                    $entry['path'], $assetRoot, $entry['sha256'], $error )) {
+                return false;
+            }
+
+            $url = htmlspecialchars(
+                $entry['path'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' );
+            if ( $expectedType === 'style' ) {
+                $tags[$key] = '<link rel="stylesheet" href="' . $url . '">';
+            } else {
+                $defer = !empty( $entry['defer'] ) ? ' defer' : '';
+                $tags[$key] = '<script src="' . $url . '"' .
+                    $defer . '></script>';
+            }
+        }
+        $tags['pre-jsdelivr'] = '';
+        $tags['pre-cloudflare'] = '';
+        return $tags;
+    }
+
+    public static function buildLocalAssetTagsFromManifestFile(
+        $manifestFile, $assetRoot, $manifestSha256, &$error=null )
+    {
+        if ( !is_string( $manifestFile ) || $manifestFile === ''
+          || trim( $manifestFile ) !== $manifestFile
+          || substr( $manifestFile, 0, 1 ) === '/'
+          || strpos( $manifestFile, '%' ) !== false
+          || strpos( $manifestFile, '?' ) !== false
+          || strpos( $manifestFile, '#' ) !== false
+          || strpos( $manifestFile, '\\' ) !== false
+          || preg_match( '/[\x00-\x20\x7f]/', $manifestFile )) {
+            $error = 'Invalid AFS asset-manifest path.';
+            return false;
+        }
+        foreach ( explode( '/', $manifestFile ) as $segment ) {
+            if ( $segment === '' || $segment === '.' || $segment === '..' ) {
+                $error = 'Invalid AFS asset-manifest path component.';
+                return false;
+            }
+        }
+
+        $root = is_string( $assetRoot ) ? @realpath( $assetRoot ) : false;
+        if ( $root === false ) {
+            $error = 'The AFS asset root is unavailable.';
+            return false;
+        }
+        $candidate = $root;
+        foreach ( explode( '/', $manifestFile ) as $segment ) {
+            $candidate .= '/' . $segment;
+            $component = @lstat( $candidate );
+            if ( !is_array( $component )
+              || ( isset( $component['mode'] )
+                && ( $component['mode'] & 0170000 ) === 0120000 )) {
+                $error = 'The AFS asset manifest cannot contain symlinks.';
+                return false;
+            }
+        }
+        $resolved = @realpath( $candidate );
+        $root = rtrim( str_replace( '\\', '/', $root ), '/' );
+        $resolved = $resolved === false ? false
+            : str_replace( '\\', '/', $resolved );
+        if ( $resolved === false
+          || strpos( $resolved, $root . '/' ) !== 0
+          || !is_file( $resolved ) || !is_readable( $resolved )) {
+            $error = 'The AFS asset manifest is unavailable or outside its root.';
+            return false;
+        }
+        $raw = @file_get_contents( $resolved );
+        if ( !is_string( $raw ) || strlen( $raw ) > 1048576 ) {
+            $error = 'Unable to read the AFS asset manifest.';
+            return false;
+        }
+        if ( !is_string( $manifestSha256 )
+          || !preg_match( '/^[a-f0-9]{64}$/', $manifestSha256 )
+          || !hash_equals( $manifestSha256, hash( 'sha256', $raw ))) {
+            $error = 'AFS asset-manifest digest mismatch.';
+            return false;
+        }
+        $decoded = json_decode( $raw, true );
+        if ( !is_array( $decoded )
+          || count( $decoded ) !== 2
+          || !array_key_exists( 'version', $decoded )
+          || !array_key_exists( 'assets', $decoded )
+          || $decoded['version'] !== 1
+          || !is_array( $decoded['assets'] )) {
+            $error = 'Invalid AFS asset-manifest schema.';
+            return false;
+        }
+        return self::buildLocalAssetTags(
+            $decoded['assets'], $root, $error );
+    }
+
+    public static function validateLocalAsset( $reference, $assetRoot,
+                                                $sha256, &$error=null )
+    {
+        if ( !is_string( $reference ) || trim( $reference ) !== $reference
+          || $reference === '' || substr( $reference, 0, 1 ) === '/'
+          || strpos( $reference, '%' ) !== false
+          || strpos( $reference, '?' ) !== false
+          || strpos( $reference, '#' ) !== false
+          || strpos( $reference, '\\' ) !== false
+          || preg_match( '/[\x00-\x20\x7f]/', $reference )
+          || preg_match( '/^[a-z][a-z0-9+.-]*:/i', $reference )) {
+            $error = 'Invalid local asset path.';
+            return false;
+        }
+        foreach ( explode( '/', $reference ) as $segment ) {
+            if ( $segment === '' || $segment === '.' || $segment === '..' ) {
+                $error = 'Invalid local asset path component.';
+                return false;
+            }
+        }
+        if ( !is_string( $sha256 )
+          || !preg_match( '/^[a-f0-9]{64}$/', $sha256 )) {
+            $error = 'Each local asset requires a reviewed SHA-256 digest.';
+            return false;
+        }
+
+        $root = is_string( $assetRoot ) ? @realpath( $assetRoot ) : false;
+        $candidatePath = $root !== false ? $root : '';
+        if ( $root !== false ) {
+            foreach ( explode( '/', $reference ) as $segment ) {
+                $candidatePath .= '/' . $segment;
+                $component = @lstat( $candidatePath );
+                if ( !is_array( $component )
+                  || ( isset( $component['mode'] )
+                    && ( $component['mode'] & 0170000 ) === 0120000 )) {
+                    $error = 'Local asset paths cannot contain symbolic links: ' .
+                        $reference;
+                    return false;
+                }
+            }
+        }
+        $candidate = $root !== false ? @realpath( $candidatePath ) : false;
+        if ( $root === false || $candidate === false ) {
+            $error = 'Required local asset is missing: ' . $reference;
+            return false;
+        }
+        $root = rtrim( str_replace( '\\', '/', $root ), '/' );
+        $candidate = str_replace( '\\', '/', $candidate );
+        $withinRoot = $candidate === $root
+            || ( $root === ''
+                ? strpos( $candidate, '/' ) === 0
+                : strpos( $candidate, $root . '/' ) === 0 );
+        if ( !$withinRoot || !is_file( $candidate )
+          || !is_readable( $candidate )) {
+            $error = 'Local asset is unavailable or outside the configured ' .
+                'asset root: ' . $reference;
+            return false;
+        }
+        $actual = @hash_file( 'sha256', $candidate );
+        if ( !is_string( $actual )
+          || !hash_equals( $sha256, $actual )) {
+            $error = 'Local asset digest mismatch: ' . $reference;
+            return false;
+        }
+        return true;
+    }
+
+}
+
+/*
+ * Path-policy preview for the Tiny File Manager data-plane provider API.
+ *
+ * The historical Afs helpers above only prove that an object is on the same
+ * client device as /afs.  They do not constrain an operation to the configured
+ * Tiny File Manager root.  This facade owns both resolution and I/O so an AFS
+ * failure can never fall through to a generic filesystem helper.  It is not a
+ * production security boundary: PHP 7.4 cannot bind a pathname walk and later
+ * mutation to one directory descriptor.  A production implementation must use
+ * an openat2-style RESOLVE_BENEATH/RESOLVE_NO_MAGICLINKS boundary (initially
+ * RESOLVE_NO_SYMLINKS), or an equivalent native broker.
+ *
+ * POSIX symbolic links and kernel mount points below the configured root are
+ * rejected.  AFS volume mount points are different objects: ordinary logical
+ * traversal through them is allowed, but recursive copy/delete stops at a
+ * child volume boundary.  A user can navigate into that volume and start a new
+ * operation there.  The exact mutation semantics still require live YFS tests.
+ */
+class AfsDataPlane extends Afs implements AfsDataPlaneProvider
+{
+    protected $dataRoot = '';
+    protected $dataRootDevice = null;
+    protected $dataRootIdentity = array();
+    protected $kernelMountPoints = null;
+    protected $volumeMountCache = array();
+    protected $identityCache = array();
+    protected $crossedVolumeMounts = array();
+
+    public function isProductionReady()
+    {
+        return false;
+    }
+
+    public function getReadinessFailure()
+    {
+        return 'The bundled PHP AFS provider is pathname-based. Configure a ' .
+            'descriptor-backed AfsDataPlaneProvider before production use.';
+    }
+
+    public function getSecurityBoundary()
+    {
+        return 'pathname-preview';
+    }
+
+    public function getProviderIdentity()
+    {
+        return 'tinyfilemanager-afs-pathname-preview-v1';
+    }
+
+    public function getCredentialIdentity()
+    {
+        return $this->credentialIdentity;
+    }
+
+    public function initializeDataPlane( $root )
+    {
+        if ( !$this->isAvailable() || !is_array( $this->afsStat )) {
+            $this->errorMsg = 'AFS data-plane guard is unavailable.';
+            return false;
+        }
+
+        $root = $this->normalizeAbsolutePath( $root );
+        if ( $root === false ) {
+            $this->errorMsg = 'Invalid AFS data root.';
+            return false;
+        }
+
+        $rootLstat = $this->pathLstat( $root );
+        $rootStat = $this->pathStat( $root );
+        $rootReal = $this->pathRealpath( $root );
+        if ( !is_array( $rootLstat ) || !is_array( $rootStat )
+          || $this->statIsLink( $rootLstat )
+          || !$this->statIsDirectory( $rootStat )
+          || $rootReal === false ) {
+            $this->errorMsg = 'The configured root is not a real AFS directory.';
+            return false;
+        }
+
+        $rootReal = $this->normalizeAbsolutePath( $rootReal );
+        if ( $rootReal === false ) {
+            $this->errorMsg = 'Unable to resolve the configured AFS root.';
+            return false;
+        }
+
+        $mounts = $this->loadKernelMountPoints();
+        if ( !is_array( $mounts )) {
+            $this->errorMsg = 'Unable to inspect the kernel mount table.';
+            return false;
+        }
+
+        $this->dataRoot = $rootReal;
+        $this->dataRootDevice = $rootStat['dev'];
+        $this->kernelMountPoints = array_fill_keys( $mounts, true );
+
+        $identity = $this->probeAfsIdentity( $rootReal, false, true );
+        if ( !is_array( $identity )) {
+            $this->dataRoot = '';
+            $this->errorMsg = 'Unable to identify the configured AFS root.';
+            return false;
+        }
+
+        $this->dataRootIdentity = $identity;
+        return true;
+    }
+
+    public function getDataRoot()
+    {
+        return $this->dataRoot;
+    }
+
+    public function getCrossedVolumeMounts()
+    {
+        return $this->crossedVolumeMounts;
+    }
+
+    public function archivesSupported()
+    {
+        // ZipArchive::extractTo(), PharData::extractTo(), and the upstream
+        // archive walkers own their own pathname traversal.  They must not be
+        // used in AFS mode until per-entry guarded implementations exist.
+        return false;
+    }
+
+    public function resolveExistingPath( $path, $type='any' )
+    {
+        return $this->resolveConfinedPath( $path, $type, false );
+    }
+
+    public function resolveWritePath( $path, $allowExisting=true )
+    {
+        $path = $this->normalizeAbsolutePath( $path );
+        if ( $path === false || !$this->pathWithinRoot( $path )
+          || $path === $this->dataRoot ) {
+            $this->errorMsg = 'Write target is outside the configured AFS root.';
+            return false;
+        }
+
+        $existing = $this->pathLstat( $path );
+        if ( is_array( $existing )) {
+            if ( !$allowExisting ) {
+                $this->errorMsg = 'The destination already exists.';
+                return false;
+            }
+            return $this->resolveConfinedPath( $path, 'file', false );
+        }
+
+        $leaf = basename( $path );
+        if ( !$this->validLeafName( $leaf )) {
+            $this->errorMsg = 'Invalid AFS destination name.';
+            return false;
+        }
+
+        $parent = $this->resolveConfinedPath( dirname( $path ), 'dir', false );
+        if ( $parent === false ) {
+            return false;
+        }
+
+        return $parent . '/' . $leaf;
+    }
+
+    public function inspectPath( $path, $allowLinkObject=false )
+    {
+        $path = $allowLinkObject
+            ? $this->resolveObjectPath( $path )
+            : $this->resolveExistingPath( $path );
+        if ( $path === false ) {
+            return false;
+        }
+
+        $lstat = $this->pathLstat( $path );
+        if ( !is_array( $lstat )) {
+            return false;
+        }
+        if ( $this->statIsLink( $lstat )) {
+            if ( !$allowLinkObject ) {
+                return false;
+            }
+            $target = @readlink( $path );
+            if ( $target === false ) {
+                return false;
+            }
+            return array(
+                'path' => $path,
+                'type' => 'link',
+                'size' => isset( $lstat['size'] ) ? $lstat['size'] : 0,
+                'mtime' => isset( $lstat['mtime'] ) ? $lstat['mtime'] : 0,
+                'mode' => isset( $lstat['mode'] ) ? $lstat['mode'] : 0,
+                'link_target' => $target
+            );
+        }
+
+        $stat = $this->pathStat( $path );
+        if ( !is_array( $stat )) {
+            return false;
+        }
+        if ( $this->statIsDirectory( $stat )) {
+            $type = 'dir';
+        } elseif ( $this->statIsFile( $stat )) {
+            $type = 'file';
+        } else {
+            return false;
+        }
+        return array(
+            'path' => $path,
+            'type' => $type,
+            'size' => isset( $stat['size'] ) ? $stat['size'] : 0,
+            'mtime' => isset( $stat['mtime'] ) ? $stat['mtime'] : 0,
+            'mode' => isset( $stat['mode'] ) ? $stat['mode'] : 0,
+            'link_target' => false
+        );
+    }
+
+    public function listDirectory( $path )
+    {
+        $path = $this->resolveExistingPath( $path, 'dir' );
+        if ( $path === false ) {
+            return false;
+        }
+
+        $items = @scandir( $path );
+        if ( !is_array( $items )) {
+            $this->errorMsg = 'Unable to list the AFS directory.';
+            return false;
+        }
+
+        $safe = array();
+        foreach ( $items as $item ) {
+            if ( $item === '.' || $item === '..' ) {
+                continue;
+            }
+            if ( $this->inspectPath(
+                    $path . '/' . $item, true ) !== false ) {
+                $safe[] = $item;
+            }
+        }
+        return $safe;
+    }
+
+    public function searchFiles( $path, $filter='' )
+    {
+        $path = $this->resolveExistingPath( $path, 'dir' );
+        if ( $path === false ) {
+            return false;
+        }
+
+        $results = array();
+        if ( !$this->searchDirectory( $path, $path, (string)$filter, $results )) {
+            return false;
+        }
+        return $results;
+    }
+
+    public function openRead( $path )
+    {
+        $path = $this->resolveExistingPath( $path, 'file' );
+        if ( $path === false ) {
+            return false;
+        }
+
+        $handle = @fopen( $path, 'rb' );
+        if ( $handle === false || !$this->validateOpenHandle( $handle, $path )) {
+            if ( is_resource( $handle )) {
+                @fclose( $handle );
+            }
+            $this->errorMsg = 'Unable to open a confined AFS file.';
+            return false;
+        }
+
+        return $handle;
+    }
+
+    public function readContents( $path )
+    {
+        $handle = $this->openRead( $path );
+        if ( $handle === false ) {
+            return false;
+        }
+
+        $contents = '';
+        $ok = true;
+        while ( !feof( $handle )) {
+            $buffer = fread( $handle, 1024 * 1024 );
+            if ( $buffer === false ) {
+                $ok = false;
+                break;
+            }
+            $contents .= $buffer;
+        }
+        if ( !@fclose( $handle )) {
+            $ok = false;
+        }
+
+        if ( !$ok ) {
+            $this->errorMsg = 'Unable to read the complete AFS file.';
+            return false;
+        }
+        return $contents;
+    }
+
+    public function detectMimeType( $path )
+    {
+        $handle = $this->openRead( $path );
+        if ( $handle === false ) {
+            return false;
+        }
+        $sample = @fread( $handle, 262144 );
+        $closed = @fclose( $handle );
+        if ( $sample === false || !$closed ) {
+            $this->errorMsg = 'Unable to sample the confined AFS file.';
+            return false;
+        }
+
+        if ( function_exists( 'finfo_open' )
+          && function_exists( 'finfo_buffer' )) {
+            $finfo = @finfo_open( FILEINFO_MIME_TYPE );
+            if ( $finfo !== false ) {
+                $mime = @finfo_buffer( $finfo, $sample );
+                if ( PHP_VERSION_ID < 80000 ) {
+                    @finfo_close( $finfo );
+                }
+                if ( is_string( $mime ) && $mime !== '' ) {
+                    return $mime;
+                }
+            }
+        }
+        return 'application/octet-stream';
+    }
+
+    public function readAcl( $path='' )
+    {
+        $path = $this->resolveExistingPath( $path );
+        return $path !== false ? parent::readAcl( $path ) : false;
+    }
+
+    public function changeAclEntries( $entries, $path='', $negative=false )
+    {
+        $path = $this->resolveExistingPath( $path );
+        return $path !== false
+            ? parent::changeAclEntries( $entries, $path, $negative ) : false;
+    }
+
+    public function getACLAccess( $path )
+    {
+        $path = $this->resolveExistingPath( $path );
+        return $path !== false ? parent::getACLAccess( $path ) : '';
+    }
+
+    public function createFile( $path )
+    {
+        $path = $this->resolveWritePath( $path, false );
+        if ( $path === false ) {
+            return false;
+        }
+
+        $handle = @fopen( $path, 'x+b' );
+        if ( $handle === false || !$this->validateOpenHandle( $handle, $path )) {
+            if ( is_resource( $handle )) {
+                @fclose( $handle );
+            }
+            @unlink( $path );
+            $this->errorMsg = 'Unable to create a confined AFS file.';
+            return false;
+        }
+
+        $ok = @fflush( $handle );
+        if ( !@fclose( $handle )) {
+            $ok = false;
+        }
+        if ( !$ok ) {
+            @unlink( $path );
+            $this->errorMsg = 'Unable to close the new AFS file.';
+            return false;
+        }
+        return $this->resolveExistingPath( $path, 'file' ) !== false;
+    }
+
+    public function writeFile( $path, $contents )
+    {
+        $path = $this->resolveWritePath( $path, true );
+        if ( $path === false ) {
+            return false;
+        }
+
+        $newFile = !is_array( $this->pathLstat( $path ));
+        $handle = @fopen( $path, $newFile ? 'x+b' : 'c+b' );
+        if ( $handle === false || !$this->validateOpenHandle( $handle, $path )) {
+            if ( is_resource( $handle )) {
+                @fclose( $handle );
+            }
+            if ( $newFile ) {
+                @unlink( $path );
+            }
+            $this->errorMsg = 'Unable to open the AFS write target.';
+            return false;
+        }
+
+        $ok = @ftruncate( $handle, 0 ) && @rewind( $handle );
+        if ( $ok ) {
+            $ok = $this->writeAll( $handle, (string)$contents );
+        }
+        if ( $ok ) {
+            $ok = @fflush( $handle );
+        }
+        if ( !@fclose( $handle )) {
+            $ok = false;
+        }
+
+        if ( !$ok ) {
+            if ( $newFile ) {
+                @unlink( $path );
+            }
+            $this->errorMsg = 'Unable to write the complete AFS file.';
+            return false;
+        }
+        return $this->resolveExistingPath( $path, 'file' ) !== false;
+    }
+
+    public function importFile( $source, $destination, $overwrite=true,
+                                $append=false )
+    {
+        $sourceHandle = @fopen( $source, 'rb' );
+        $sourceStat = is_resource( $sourceHandle ) ? @fstat( $sourceHandle ) : false;
+        if ( $sourceHandle === false || !is_array( $sourceStat )
+          || !$this->statIsFile( $sourceStat )) {
+            if ( is_resource( $sourceHandle )) {
+                @fclose( $sourceHandle );
+            }
+            $this->errorMsg = 'Unable to open the import source.';
+            return false;
+        }
+
+        $destination = $this->resolveWritePath( $destination, $overwrite );
+        if ( $destination === false ) {
+            @fclose( $sourceHandle );
+            return false;
+        }
+
+        $newFile = !is_array( $this->pathLstat( $destination ));
+        $destinationHandle = @fopen(
+            $destination, $newFile ? 'x+b' : 'c+b' );
+        if ( $destinationHandle === false
+          || !$this->validateOpenHandle( $destinationHandle, $destination )) {
+            @fclose( $sourceHandle );
+            if ( is_resource( $destinationHandle )) {
+                @fclose( $destinationHandle );
+            }
+            if ( $newFile ) {
+                @unlink( $destination );
+            }
+            $this->errorMsg = 'Unable to open the AFS import target.';
+            return false;
+        }
+
+        $ok = true;
+        if ( $append ) {
+            $ok = @fseek( $destinationHandle, 0, SEEK_END ) === 0;
+        } else {
+            $ok = @ftruncate( $destinationHandle, 0 )
+                && @rewind( $destinationHandle );
+        }
+
+        while ( $ok && !feof( $sourceHandle )) {
+            $buffer = fread( $sourceHandle, 1024 * 1024 );
+            if ( $buffer === false ) {
+                $ok = false;
+                break;
+            }
+            if ( !$this->writeAll( $destinationHandle, $buffer )) {
+                $ok = false;
+            }
+        }
+        if ( $ok ) {
+            $ok = @fflush( $destinationHandle );
+        }
+        if ( !@fclose( $sourceHandle )) {
+            $ok = false;
+        }
+        if ( !@fclose( $destinationHandle )) {
+            $ok = false;
+        }
+
+        if ( !$ok ) {
+            if ( $newFile ) {
+                @unlink( $destination );
+            }
+            $this->errorMsg = 'Unable to import the complete file into AFS.';
+            return false;
+        }
+        return $this->resolveExistingPath( $destination, 'file' ) !== false;
+    }
+
+    public function makeDirectory( $path, $recursive=true )
+    {
+        $path = $this->normalizeAbsolutePath( $path );
+        if ( $path === false || !$this->pathWithinRoot( $path )) {
+            $this->errorMsg = 'Directory target is outside the configured AFS root.';
+            return false;
+        }
+        if ( $path === $this->dataRoot ) {
+            return true;
+        }
+
+        $relative = substr( $path, strlen( $this->dataRoot ) + 1 );
+        $segments = explode( '/', $relative );
+        if ( !$recursive && count( $segments ) !== 1
+          && !is_array( $this->pathLstat( dirname( $path )))) {
+            $this->errorMsg = 'The parent AFS directory does not exist.';
+            return false;
+        }
+
+        $current = $this->dataRoot;
+        foreach ( $segments as $segment ) {
+            if ( !$this->validLeafName( $segment )) {
+                return false;
+            }
+            $current .= '/' . $segment;
+            if ( is_array( $this->pathLstat( $current ))) {
+                if ( $this->resolveExistingPath( $current, 'dir' ) === false ) {
+                    return false;
+                }
+                continue;
+            }
+            if ( !@mkdir( $current, 0755, false )) {
+                $this->errorMsg = 'Unable to create the AFS directory.';
+                return false;
+            }
+            if ( $this->resolveExistingPath( $current, 'dir' ) === false ) {
+                @rmdir( $current );
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public function copyPath( $source, $destination, $update=true,
+                              $force=true )
+    {
+        $source = $this->resolveExistingPath( $source );
+        if ( $source === false || !$this->preflightRecursiveTree( $source )) {
+            return false;
+        }
+
+        return $this->copyResolvedPath(
+            $source, $destination, $update, $force );
+    }
+
+    public function renamePath( $source, $destination )
+    {
+        $source = $this->resolveObjectPath( $source );
+        if ( $source === false || $source === $this->dataRoot ) {
+            return false;
+        }
+
+        $sourceInfo = $this->inspectPath( $source, true );
+        if ( $sourceInfo === false ) {
+            return false;
+        }
+        if ( $sourceInfo['type'] === 'dir' ) {
+            $mount = $this->probeAfsVolumeMountPoint( $source );
+            if ( $mount === null || $mount !== false ) {
+                $this->errorMsg = 'AFS volume mount objects cannot be renamed here.';
+                return false;
+            }
+        }
+
+        if ( is_array( $this->pathLstat( $destination ))) {
+            $this->errorMsg = 'The destination already exists.';
+            return null;
+        }
+        $destination = $this->resolveWritePath( $destination, false );
+        if ( $destination === false ) {
+            return false;
+        }
+
+        if ( !@rename( $source, $destination )) {
+            $this->errorMsg = 'Unable to rename the AFS object.';
+            return false;
+        }
+
+        $destinationInfo = $this->inspectPath( $destination, true );
+        if ( $destinationInfo === false
+          || $destinationInfo['type'] !== $sourceInfo['type'] ) {
+            @rename( $destination, $source );
+            $this->errorMsg = 'AFS rename post-validation failed.';
+            return false;
+        }
+        return true;
+    }
+
+    public function removePath( $path )
+    {
+        $path = $this->resolveObjectPath( $path );
+        $info = $path !== false ? $this->inspectPath( $path, true ) : false;
+        if ( is_array( $info ) && $info['type'] === 'link' ) {
+            return @unlink( $path );
+        }
+        if ( $path === false || $path === $this->dataRoot
+          || !$this->preflightRecursiveTree( $path, true )) {
+            return false;
+        }
+        return $this->removeResolvedPath( $path );
+    }
+
+    protected function resolveObjectPath( $path )
+    {
+        $path = $this->normalizeAbsolutePath( $path );
+        if ( $path === false || !$this->pathWithinRoot( $path )) {
+            $this->errorMsg = 'Object path is outside the configured AFS root.';
+            return false;
+        }
+        if ( $path === $this->dataRoot ) {
+            return $this->dataRoot;
+        }
+        $leaf = basename( $path );
+        if ( !$this->validLeafName( $leaf )) {
+            return false;
+        }
+        $parent = $this->resolveExistingPath( dirname( $path ), 'dir' );
+        if ( $parent === false ) {
+            return false;
+        }
+        $object = $parent . '/' . $leaf;
+        $lstat = $this->pathLstat( $object );
+        if ( !is_array( $lstat )) {
+            return false;
+        }
+        if ( $this->statIsLink( $lstat )) {
+            return $object;
+        }
+        return $this->resolveExistingPath( $object );
+    }
+
+    protected function resolveConfinedPath( $path, $type, $allowMissing )
+    {
+        if ( $this->dataRoot === '' ) {
+            $this->errorMsg = 'AFS data-plane guard is not initialized.';
+            return false;
+        }
+
+        $path = $this->normalizeAbsolutePath( $path );
+        if ( $path === false || !$this->pathWithinRoot( $path )) {
+            $this->errorMsg = 'Path is outside the configured AFS root.';
+            return false;
+        }
+
+        if ( $path === $this->dataRoot ) {
+            if ( $type === 'file' ) {
+                return false;
+            }
+            return $this->dataRoot;
+        }
+
+        $relative = substr( $path, strlen( $this->dataRoot ) + 1 );
+        $segments = explode( '/', $relative );
+        $current = $this->dataRoot;
+        $last = count( $segments ) - 1;
+
+        foreach ( $segments as $index => $segment ) {
+            if ( !$this->validLeafName( $segment )) {
+                $this->errorMsg = 'Invalid AFS path component.';
+                return false;
+            }
+
+            $current .= '/' . $segment;
+            $lstat = $this->pathLstat( $current );
+            if ( !is_array( $lstat )) {
+                if ( $allowMissing && $index === $last ) {
+                    return $current;
+                }
+                $this->errorMsg = 'AFS path does not exist.';
+                return false;
+            }
+            if ( $this->statIsLink( $lstat )) {
+                $this->errorMsg = 'POSIX symbolic links are not traversable in AFS mode.';
+                return false;
+            }
+
+            $stat = $this->pathStat( $current );
+            $real = $this->pathRealpath( $current );
+            if ( !is_array( $stat ) || $real === false ) {
+                $this->errorMsg = 'Unable to resolve the AFS path.';
+                return false;
+            }
+            $real = $this->normalizeAbsolutePath( $real );
+            if ( $real === false || !$this->pathWithinRoot( $real )) {
+                $this->errorMsg = 'Resolved path escapes the configured AFS root.';
+                return false;
+            }
+            if ( $real !== $this->dataRoot
+              && $this->isKernelMountPoint( $real )) {
+                $this->errorMsg = 'Kernel mount points are not traversable in AFS mode.';
+                return false;
+            }
+
+            $identity = $this->probeAfsIdentity( $real, false );
+            if ( !is_array( $identity )) {
+                $this->errorMsg = 'Unable to verify AFS object identity.';
+                return false;
+            }
+
+            $needsDirectory = $index < $last || $type === 'dir';
+            if ( $needsDirectory && !$this->statIsDirectory( $stat )) {
+                $this->errorMsg = 'AFS path component is not a directory.';
+                return false;
+            }
+            if ( $this->statIsDirectory( $stat )) {
+                $mount = $this->probeAfsVolumeMountPoint( $real );
+                if ( $mount === null ) {
+                    $this->errorMsg = 'Unable to classify an AFS volume mount point.';
+                    return false;
+                }
+                if ( $mount !== false ) {
+                    $this->crossedVolumeMounts[$real] = array(
+                        'target' => $mount,
+                        'identity' => $identity
+                    );
+                }
+            }
+            $current = $real;
+        }
+
+        $finalStat = $this->pathStat( $current );
+        if ( $type === 'file' && !$this->statIsFile( $finalStat )) {
+            $this->errorMsg = 'AFS object is not a regular file.';
+            return false;
+        }
+        if ( $type === 'dir' && !$this->statIsDirectory( $finalStat )) {
+            $this->errorMsg = 'AFS object is not a directory.';
+            return false;
+        }
+        if ( $type === 'any' && !$this->statIsFile( $finalStat )
+          && !$this->statIsDirectory( $finalStat )) {
+            $this->errorMsg = 'Unsupported AFS object type.';
+            return false;
+        }
+
+        return $current;
+    }
+
+    protected function validateOpenHandle( $handle, $path )
+    {
+        $handleStat = @fstat( $handle );
+        $pathStat = $this->pathStat( $path );
+        if ( !is_array( $handleStat ) || !is_array( $pathStat )
+          || !$this->statIsFile( $handleStat )
+          || $pathStat['dev'] != $handleStat['dev'] ) {
+            return false;
+        }
+
+        if ( !empty( $handleStat['ino'] ) && !empty( $pathStat['ino'] )
+          && $handleStat['ino'] != $pathStat['ino'] ) {
+            return false;
+        }
+
+        unset( $this->identityCache['follow:' . $path] );
+        unset( $this->identityCache['nofollow:' . $path] );
+        return $this->resolveExistingPath( $path, 'file' ) === $path;
+    }
+
+    protected function writeAll( $handle, $contents )
+    {
+        $length = strlen( $contents );
+        $written = 0;
+        while ( $written < $length ) {
+            $bytes = fwrite( $handle, substr( $contents, $written ));
+            if ( $bytes === false || $bytes === 0 ) {
+                return false;
+            }
+            $written += $bytes;
+        }
+        return true;
+    }
+
+    protected function searchDirectory( $base, $path, $filter, &$results )
+    {
+        $items = @scandir( $path );
+        if ( !is_array( $items )) {
+            return false;
+        }
+        foreach ( $items as $item ) {
+            if ( $item === '.' || $item === '..' ) {
+                continue;
+            }
+            $child = $this->resolveExistingPath( $path . '/' . $item );
+            if ( $child === false ) {
+                // A symlink, kernel mount, or otherwise unresolvable entry is
+                // not traversed and cannot leak search results.
+                continue;
+            }
+            $stat = $this->pathStat( $child );
+            if ( $this->statIsDirectory( $stat )) {
+                $mount = $this->probeAfsVolumeMountPoint( $child );
+                if ( $mount === null ) {
+                    return false;
+                }
+                if ( $mount !== false ) {
+                    // The caller can navigate into this child volume and start
+                    // a new search there; a parent search never crosses it.
+                    continue;
+                }
+                if ( !$this->searchDirectory( $base, $child, $filter, $results )) {
+                    return false;
+                }
+            } elseif ( $this->statIsFile( $stat )
+              && ( $filter === '' || stripos( $item, $filter ) !== false )) {
+                $results[] = array(
+                    'name' => $item,
+                    'type' => 'file',
+                    'path' => dirname( substr( $child, strlen( $base )))
+                );
+            }
+        }
+        return true;
+    }
+
+    protected function preflightRecursiveTree( $path, $allowLinks=false )
+    {
+        $info = $this->inspectPath( $path, $allowLinks );
+        if ( $info === false ) {
+            return false;
+        }
+        $path = $info['path'];
+        if ( $info['type'] === 'link' ) {
+            return $allowLinks;
+        }
+        if ( $info['type'] === 'file' ) {
+            return true;
+        }
+        if ( $info['type'] !== 'dir' ) {
+            return false;
+        }
+
+        $mount = $this->probeAfsVolumeMountPoint( $path );
+        if ( $mount === null || $mount !== false ) {
+            $this->errorMsg = 'Recursive mutation stops at an AFS volume mount point.';
+            return false;
+        }
+
+        $items = @scandir( $path );
+        if ( !is_array( $items )) {
+            return false;
+        }
+        foreach ( $items as $item ) {
+            if ( $item === '.' || $item === '..' ) {
+                continue;
+            }
+            $child = $path . '/' . $item;
+            if ( !$this->preflightRecursiveTree( $child, $allowLinks )) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    protected function copyResolvedPath( $source, $destination, $update, $force )
+    {
+        $stat = $this->pathStat( $source );
+        if ( $this->statIsFile( $stat )) {
+            if ( is_array( $this->pathLstat( $destination )) && $update ) {
+                $destinationSafe = $this->resolveExistingPath( $destination, 'file' );
+                if ( $destinationSafe === false
+                  || @filemtime( $destinationSafe ) >= @filemtime( $source )) {
+                    return false;
+                }
+            }
+            $sourceHandle = $this->openRead( $source );
+            if ( $sourceHandle === false ) {
+                return false;
+            }
+            $temporary = @tempnam( sys_get_temp_dir(), 'tinyfm-afs-copy-' );
+            if ( $temporary === false ) {
+                @fclose( $sourceHandle );
+                return false;
+            }
+            $temporaryHandle = @fopen( $temporary, 'wb' );
+            $ok = is_resource( $temporaryHandle );
+            while ( $ok && !feof( $sourceHandle )) {
+                $buffer = fread( $sourceHandle, 1024 * 1024 );
+                if ( $buffer === false
+                  || !$this->writeAll( $temporaryHandle, $buffer )) {
+                    $ok = false;
+                }
+            }
+            if ( $ok ) {
+                $ok = @fflush( $temporaryHandle );
+            }
+            if ( is_resource( $temporaryHandle ) && !@fclose( $temporaryHandle )) {
+                $ok = false;
+            }
+            if ( !@fclose( $sourceHandle )) {
+                $ok = false;
+            }
+            if ( $ok ) {
+                $ok = $this->importFile( $temporary, $destination, true, false );
+            }
+            if ( !@unlink( $temporary )) {
+                $ok = false;
+            }
+            return $ok;
+        }
+
+        if ( !$this->statIsDirectory( $stat )) {
+            return false;
+        }
+
+        $destinationNormalized = $this->normalizeAbsolutePath( $destination );
+        if ( $destinationNormalized === false ) {
+            return false;
+        }
+        $destinationParent = $this->resolveExistingPath(
+            dirname( $destinationNormalized ), 'dir' );
+        if ( $destinationParent === false
+          || $destinationParent === $source
+          || strpos( $destinationParent . '/', rtrim( $source, '/' ) . '/' ) === 0 ) {
+            $this->errorMsg = 'Cannot copy a directory inside itself.';
+            return false;
+        }
+
+        if ( is_array( $this->pathLstat( $destinationNormalized ))) {
+            if ( $this->resolveExistingPath( $destinationNormalized, 'dir' ) === false ) {
+                return false;
+            }
+        } elseif ( !$this->makeDirectory( $destinationNormalized, false )) {
+            return false;
+        }
+
+        $items = @scandir( $source );
+        if ( !is_array( $items )) {
+            return false;
+        }
+        foreach ( $items as $item ) {
+            if ( $item === '.' || $item === '..' ) {
+                continue;
+            }
+            if ( !$this->copyResolvedPath(
+                    $source . '/' . $item,
+                    $destinationNormalized . '/' . $item,
+                    $update, $force )) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    protected function removeResolvedPath( $path )
+    {
+        $info = $this->inspectPath( $path, true );
+        if ( $info === false ) {
+            return false;
+        }
+        if ( $info['type'] === 'link' || $info['type'] === 'file' ) {
+            return @unlink( $path );
+        }
+        if ( $info['type'] !== 'dir' ) {
+            return false;
+        }
+
+        $items = @scandir( $path );
+        if ( !is_array( $items )) {
+            return false;
+        }
+        foreach ( $items as $item ) {
+            if ( $item === '.' || $item === '..' ) {
+                continue;
+            }
+            if ( !$this->removeResolvedPath( $path . '/' . $item )) {
+                return false;
+            }
+        }
+        return @rmdir( $path );
+    }
+
+    protected function probeAfsIdentity( $path, $nofollow=false, $fresh=false )
+    {
+        $cacheKey = ( $nofollow ? 'nofollow:' : 'follow:' ) . $path;
+        $arguments = array( 'getfid', '-path', $path );
+        if ( $nofollow ) {
+            $arguments[] = '-nofollow';
+        }
+        $output = $this->runFs( $arguments );
+        if ( $output === false || $this->lastFsStatus !== 0
+          || !preg_match( '/\(([0-9]+\.[0-9]+\.[0-9]+)\) contained in volume ([0-9]+)\s*$/',
+                $output, $matches )) {
+            return false;
+        }
+
+        $identity = array(
+            'fid' => $matches[1],
+            'volume' => $matches[2]
+        );
+        $this->identityCache[$cacheKey] = $identity;
+        return $identity;
+    }
+
+    protected function probeAfsVolumeMountPoint( $path )
+    {
+        $output = $this->runFs( array( 'lsmount', '-dir', $path ));
+        if ( $output !== false && $this->lastFsStatus === 0
+          && preg_match( "/ is a mount point for volume '([^']+)'\\s*$/",
+                $output, $matches )) {
+            $this->volumeMountCache[$path] = $matches[1];
+            return $matches[1];
+        }
+        if ( $output !== false && $this->lastFsStatus !== 0
+          && preg_match( '/ is not a mount point\.\s*$/', $output )) {
+            $this->volumeMountCache[$path] = false;
+            return false;
+        }
+
+        $this->volumeMountCache[$path] = null;
+        return null;
+    }
+
+    protected function loadKernelMountPoints()
+    {
+        $lines = @file( '/proc/self/mountinfo', FILE_IGNORE_NEW_LINES );
+        if ( !is_array( $lines )) {
+            return false;
+        }
+
+        $mounts = array();
+        foreach ( $lines as $line ) {
+            $fields = preg_split( '/\s+/', $line );
+            if ( !isset( $fields[4] )) {
+                return false;
+            }
+            $path = str_replace(
+                array( '\\040', '\\011', '\\012', '\\134' ),
+                array( ' ', "\t", "\n", '\\' ),
+                $fields[4] );
+            $path = $this->normalizeAbsolutePath( $path );
+            if ( $path !== false ) {
+                $mounts[] = $path;
+            }
+        }
+        return array_values( array_unique( $mounts ));
+    }
+
+    protected function isKernelMountPoint( $path )
+    {
+        return is_array( $this->kernelMountPoints )
+            && isset( $this->kernelMountPoints[$path] );
+    }
+
+    protected function normalizeAbsolutePath( $path )
+    {
+        if ( !is_string( $path ) || $path === ''
+          || strpos( $path, "\0" ) !== false ) {
+            return false;
+        }
+        $path = str_replace( '\\', '/', $path );
+        if ( substr( $path, 0, 1 ) !== '/' ) {
+            return false;
+        }
+
+        $clean = array();
+        foreach ( explode( '/', $path ) as $segment ) {
+            if ( $segment === '' ) {
+                continue;
+            }
+            if ( $segment === '.' || $segment === '..' ) {
+                return false;
+            }
+            $clean[] = $segment;
+        }
+        return '/' . implode( '/', $clean );
+    }
+
+    protected function validLeafName( $name )
+    {
+        return is_string( $name ) && $name !== '' && $name !== '.'
+            && $name !== '..' && strpos( $name, '/' ) === false
+            && strpos( $name, "\0" ) === false;
+    }
+
+    protected function pathWithinRoot( $path )
+    {
+        return $this->dataRoot !== ''
+            && ( $path === $this->dataRoot
+              || strpos( $path, $this->dataRoot . '/' ) === 0 );
+    }
+
+    protected function statIsLink( $stat )
+    {
+        return is_array( $stat ) && isset( $stat['mode'] )
+            && ( $stat['mode'] & 0170000 ) === 0120000;
+    }
+
+    protected function statIsDirectory( $stat )
+    {
+        return is_array( $stat ) && isset( $stat['mode'] )
+            && ( $stat['mode'] & 0170000 ) === 0040000;
+    }
+
+    protected function statIsFile( $stat )
+    {
+        return is_array( $stat ) && isset( $stat['mode'] )
+            && ( $stat['mode'] & 0170000 ) === 0100000;
+    }
+
+    protected function pathLstat( $path )
+    {
+        clearstatcache( true, $path );
+        return @lstat( $path );
+    }
+
+    protected function pathStat( $path )
+    {
+        clearstatcache( true, $path );
+        return @stat( $path );
+    }
+
+    protected function pathRealpath( $path )
+    {
+        clearstatcache( true, $path );
+        return @realpath( $path );
+    }
 }
