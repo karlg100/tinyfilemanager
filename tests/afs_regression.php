@@ -43,6 +43,18 @@ final class AfsFilesystemDouble extends Afs
     {
         $this->path = $path;
     }
+
+    public function copyItemForTest($source, $target)
+    {
+        return $this->copyItem($source, $target);
+    }
+
+    public function configureCopyRequest($originPath, $destinationPath, $selectedItems)
+    {
+        $this->originPath = $originPath;
+        $this->path = $destinationPath;
+        $this->selectedItems = $selectedItems;
+    }
 }
 
 $tests = 0;
@@ -60,7 +72,8 @@ function check($condition, $message)
 
 function remove_test_tree($path)
 {
-    if (is_link($path) || is_file($path)) {
+    if (is_link($path) || is_file($path)
+        || (file_exists($path) && !is_dir($path))) {
         @unlink($path);
         return;
     }
@@ -117,11 +130,44 @@ $unknownRightOutput = str_replace('system:anyuser rl', 'system:anyuser rlZ', $ac
 check($afs->parseAclOutput($unknownRightOutput) === false,
     'rejects an unknown ACL right instead of dropping it');
 
+$maxAclFixture = file_get_contents(
+    __DIR__ . '/fixtures/auristor-listacl-with-volume-acl.txt');
+check($maxAclFixture !== false, 'loads the AuriStor Volume ACL fixture');
+check($afs->parseAclOutput($maxAclFixture) === false,
+    'fails closed instead of merging a Volume ACL into the object ACL');
+$inheritedMaxAclFixture = preg_replace(
+    '/^Access list for /', 'Access list (inherited) for ', $maxAclFixture);
+check($afs->parseAclOutput($inheritedMaxAclFixture) === false,
+    'fails closed when an inherited object ACL is followed by a Volume ACL');
+check($afs->parseAclOutput($aclOutput . $aclOutput) === false,
+    'rejects a second object ACL header in one parser invocation');
+$repeatedNormal = str_replace(
+    "Negative rights:\n", "Normal rights:\n", $aclOutput);
+check($afs->parseAclOutput($repeatedNormal) === false,
+    'rejects a repeated Normal rights section');
+$repeatedNegative = $aclOutput . "Negative rights:\n  another r\n";
+check($afs->parseAclOutput($repeatedNegative) === false,
+    'rejects a repeated Negative rights section');
+
+$nestedAclPost = array();
+parse_str(
+    'normal[user%40cell.example][l]=1&normal[user%20name][r]=1',
+    $nestedAclPost);
+check(isset($nestedAclPost['normal']['user@cell.example']['l']),
+    'PHP preserves a dot in a nested ACL principal key');
+check(isset($nestedAclPost['normal']['user name']['r']),
+    'PHP preserves a space in a nested ACL principal key');
+
 $afs->responses[] = $aclOutput;
 $readAcl = $afs->readAcl('/afs/example');
 check($readAcl === $acl, 'readAcl returns the parsed ACL structure');
 check($afs->commands[0] === array('listacl', '/afs/example'),
     'readAcl invokes fs listacl with an argument vector');
+
+$afs->responses[] = $maxAclFixture;
+check($afs->readAcl('/afs/example') === false
+    && strpos($afs->errorMsg, 'Unable to parse') !== false,
+    'readAcl reports a fail-closed Volume ACL parse result');
 
 $afs->responses[] = "fs: permission denied\n";
 check($afs->readAcl('/afs/example') === false,
@@ -222,6 +268,61 @@ try {
         @symlink('missing-target', $broken);
         check($fsAfs->linkSafeFileExists($broken) === true,
             'lstat recognizes a broken symlink without following it');
+
+        $outside = $tempRoot . '/outside';
+        $treeSource = $tempRoot . '/tree-source';
+        $treeTarget = $tempRoot . '/tree-target';
+        check(mkdir($outside, 0700) && mkdir($treeSource, 0700),
+            'creates isolated source and outside directories');
+        check(stat($outside)['dev'] === $device,
+            'outside symlink target is on the modeled AFS device');
+        file_put_contents($outside . '/sentinel.txt', 'outside-data');
+        check(symlink($outside, $treeSource . '/outside-link'),
+            'creates a directory symlink to an outside same-device tree');
+        check($fsAfs->copy_dirs($treeSource, $treeTarget) === true,
+            'recursive copy completes with a nested directory symlink');
+        check(is_link($treeTarget . '/outside-link')
+            && readlink($treeTarget . '/outside-link') === $outside,
+            'recursive copy reproduces the directory symlink without traversing it');
+        check(file_get_contents($outside . '/sentinel.txt') === 'outside-data',
+            'recursive copy leaves the outside sentinel unchanged');
+
+        $directTarget = $tempRoot . '/direct-symlink-target';
+        check($fsAfs->copy_dirs($treeSource . '/outside-link', $directTarget) === false
+            && !file_exists($directTarget) && !is_link($directTarget),
+            'copy_dirs rejects a directory symlink passed as its top-level source');
+
+        $copiedTopLink = $tempRoot . '/copied-top-link';
+        check($fsAfs->copyItemForTest(
+            $treeSource . '/outside-link', $copiedTopLink) === true
+            && is_link($copiedTopLink)
+            && readlink($copiedTopLink) === $outside,
+            'copy dispatcher handles a top-level directory symlink as a link');
+
+        $copiedBroken = $tempRoot . '/copied-broken-link';
+        check($fsAfs->copyItemForTest($broken, $copiedBroken) === true
+            && is_link($copiedBroken)
+            && readlink($copiedBroken) === 'missing-target',
+            'copy dispatcher preserves a broken symlink');
+
+        $requestTarget = $tempRoot . '/copy-request-target';
+        check(mkdir($requestTarget, 0700),
+            'creates a destination for the copyFiles request path');
+        $fsAfs->configureCopyRequest(
+            $treeSource, $requestTarget, 'outside-link');
+        check($fsAfs->copyFiles() === true
+            && is_link($requestTarget . '/outside-link')
+            && readlink($requestTarget . '/outside-link') === $outside,
+            'copyFiles dispatches a directory symlink without traversing it');
+    }
+
+    if (function_exists('posix_mkfifo')) {
+        $fifo = $tempRoot . '/source.fifo';
+        $fifoTarget = $tempRoot . '/copied.fifo';
+        check(posix_mkfifo($fifo, 0600), 'creates an unsupported special file');
+        check($fsAfs->copyItemForTest($fifo, $fifoTarget) === false
+            && !file_exists($fifoTarget),
+            'copy dispatcher fails closed for unsupported special files');
     }
 
     check($fsAfs->escape_js("a'b\\c\r\n") === "a\\'b\\\\c\\r\\n",

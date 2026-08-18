@@ -147,6 +147,8 @@ echo "AFS I/O path audit\n";
 $pathSecurity = afs_audit_section($afs, 'function pathSecurity', 'public function makePathAFSlocal', 'Afs::pathSecurity');
 $makeLocal = afs_audit_section($afs, 'public function makePathAFSlocal', '// Checks to see if there is a folder', 'Afs::makePathAFSlocal');
 $removeFolder = afs_audit_section($afs, 'public function removeFolder', 'public function deleteFiles', 'Afs::removeFolder');
+$copyFilesPrimitive = afs_audit_section($afs, 'function copyFiles()', 'protected function copyItem', 'Afs::copyFiles');
+$copyItem = afs_audit_section($afs, 'protected function copyItem', '/* A helper function for copyFiles()', 'Afs::copyItem');
 $copyDirs = afs_audit_section($afs, 'public function copy_dirs', 'public function copy(', 'Afs::copy_dirs');
 $copyPrimitive = afs_audit_section($afs, 'public function copy(', '// A AFS safe version of the PHP readfile', 'Afs::copy');
 $readPrimitive = afs_audit_section($afs, 'function readfile()', '// Change the ACL for a given path', 'Afs::readfile');
@@ -191,9 +193,16 @@ afs_audit_protected(
 afs_audit_protected(
     'AFS recursive copy helper',
     substr_count($copyDirs, 'makePathAFSlocal(') >= 2
+        && strpos($copyFilesPrimitive, 'copyItem(') !== false
+        && strpos($copyDirs, 'copyItem(') !== false
+        && strpos($copyDirs, 'is_link( $source )') !== false
+        && strpos($copyItem, 'is_link( $source )') !== false
+        && strpos($copyItem, '@filetype( $source )') !== false
+        && strpos($copyItem, 'is_link( $source )')
+            < strpos($copyItem, '@filetype( $source )')
         && strpos($copyPrimitive, 'if ( is_link( $source ))') !== false
         && strpos($copyPrimitive, 'readlink( $name )') !== false,
-    'source and destination directories are rechecked and links are reproduced'
+    'copyFiles and copy_dirs dispatch links before directory checks, then reproduce them'
 );
 
 // Snapshot the request handlers and generic filesystem helpers.

@@ -417,22 +417,39 @@ class Afs
                 continue;
             }
 
-            // Security checks are in Afs::copy() and Afs::copy_dirs
+            // Link-safe dispatch and security checks are in copyItem().
             $sourcePath = $this->originPath . '/'. $file;
             $destPath   = $this->path . '/' . $file;
 
-            if ( filetype( $sourcePath ) == 'dir' ) {
-                if ( !$this->copy_dirs( $sourcePath, $destPath )) {
-                    $this->errorMsg = "Unable to copy $file.";
-                    return false;
-                }
-            } else if ( !$this->copy( $sourcePath, $destPath )) {
+            if ( !$this->copyItem( $sourcePath, $destPath )) {
                 $this->errorMsg = "Unable to copy $file.";
                 return false;
             }
 
             $this->notifyMsg = "Pasted the contents of the clipboard.";
         }
+
+        return true;
+    }
+
+
+    // Dispatch links before directory checks so a directory symlink is copied
+    // as a link and is never traversed by copy_dirs().
+    protected function copyItem( $source, $target )
+    {
+        if ( is_link( $source )) {
+            return $this->copy( $source, $target );
+        }
+
+        $type = @filetype( $source );
+        if ( $type === 'dir' ) {
+            return $this->copy_dirs( $source, $target );
+        }
+        if ( $type === 'file' ) {
+            return $this->copy( $source, $target );
+        }
+
+        return false;
     }
 
 
@@ -441,6 +458,10 @@ class Afs
      */
     public function copy_dirs( $source, $target )
     {
+        if ( is_link( $source ) || !is_dir( $source )) {
+            return false;
+        }
+
         $sourceReal = @realpath( $source );
         $targetParentReal = @realpath( dirname( $target ));
         if ( $sourceReal === false || $targetParentReal === false ) {
@@ -488,13 +509,8 @@ class Afs
             $sourcePath = $source . '/' . $entry;
             $targetPath = $target . '/' . $entry;
 
-            // Security checks are in Afs::copy() and Afs::copy_dirs
-            if ( filetype( $sourcePath ) == 'dir' ) {
-                if ( !$this->copy_dirs( $sourcePath, $targetPath )) {
-                    @chdir( $this->startCWD );
-                    return false;
-                }
-            } else if ( !$this->copy( $sourcePath, $targetPath )) {
+            // Link-safe dispatch and security checks are in copyItem().
+            if ( !$this->copyItem( $sourcePath, $targetPath )) {
                 @chdir( $this->startCWD );
                 return false;
             }
@@ -753,7 +769,13 @@ class Afs
             return false;
         }
 
-        return $this->parseAclOutput( $result );
+        $acl = $this->parseAclOutput( $result );
+        if ( $acl === false ) {
+            $this->errorMsg =
+                'Warning: Unable to parse the access control list.';
+        }
+
+        return $acl;
     }
 
     public function parseAclOutput( $result )
@@ -767,12 +789,12 @@ class Afs
         $acl = array(
             'normal' => array(),
             'negative' => array(),
-            'inherited' => preg_match(
-                '/^Access list \(inherited\) for /mi', $result ) === 1
+            'inherited' => false
         );
         $section = '';
         $sawHeader = false;
         $sawNormal = false;
+        $sawNegative = false;
         $lines = preg_split( '/\r?\n/', $result );
 
         foreach ( $lines as $line ) {
@@ -780,20 +802,35 @@ class Afs
             if ( $line === '' ) {
                 continue;
             }
-            if ( preg_match( '/^Access list(?: \(inherited\))? for .+ is$/i', $line )) {
+            if ( preg_match( '/^Access list( \(inherited\))? for .+ is$/i',
+                    $line, $header )) {
+                if ( $sawHeader ) {
+                    return false;
+                }
                 $sawHeader = true;
+                $acl['inherited'] = !empty( $header[1] );
+                $section = '';
                 continue;
             }
+            if ( preg_match( '/^Volume access list for .+ is$/i', $line )) {
+                // A Volume Maximum ACL is a separate, read-only policy block.
+                // Never merge it into the editable object ACL.
+                return false;
+            }
             if ( preg_match( '/^Normal rights:$/i', $line )) {
+                if ( !$sawHeader || $sawNormal ) {
+                    return false;
+                }
                 $section = 'normal';
                 $sawNormal = true;
                 continue;
             }
             if ( preg_match( '/^Negative rights:$/i', $line )) {
-                if ( !$sawNormal ) {
+                if ( !$sawNormal || $sawNegative ) {
                     return false;
                 }
                 $section = 'negative';
+                $sawNegative = true;
                 continue;
             }
             if ( !$section || !preg_match( '/^(\S+)\s+(\S+)$/', $line, $matches )) {
