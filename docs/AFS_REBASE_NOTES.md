@@ -19,6 +19,8 @@ branch   kag/afs-rebase-upstream-20260817
 | Replayed proxy commit | `a2df5e893041a3e18134299058f7aa74ccda96d9` |
 | Replayed AFS commit | `ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1` |
 | Post-rebase AFS hardening | `be98d299ec262e34bb2b759b7742c3dfc18bd3af` |
+| Independent-review AFS fix | `029ddb12bdd627601e709bd91d9dc5e801624594` |
+| Pre-existing upstream CSRF fix | `6cdef50404babb797965d152e501b4c5500f61a8` |
 
 The authoritative old-to-new mapping is:
 
@@ -104,7 +106,7 @@ The parent-directory row was adjusted with the same Owner-column rule; otherwise
 The replay does not intentionally remove or bypass these post-2020 upstream changes:
 
 - authentication enabled by default, global readonly, per-user roots, and current session handling;
-- CSRF tokens on the current mutation routes, including both POSIX and AFS permission changes;
+- CSRF tokens on the upstream-protected mutation routes, including both POSIX and AFS permission changes; the pre-existing single-copy GET mutation is corrected separately after the replay;
 - URL-upload localhost/loopback and known-port rejection before the optional proxy context;
 - current path cleaning, archive-item cleaning, filename validation, and NUL-byte rejection;
 - current filename and path output encoding and excluded-name, extension, and full-path checks;
@@ -146,14 +148,23 @@ Commit `be98d299ec262e34bb2b759b7742c3dfc18bd3af` implements the separately revi
 
 The case and inheritance handling follows the AuriStor [`fs listacl`](https://www.auristor.com/documentation/man/linux/1/fs_listacl.html) and [`fs setacl`](https://www.auristor.com/documentation/man/linux/1/fs_setacl.html) contracts: auxiliary rights are uppercase `A-H`, inherited file ACLs are marked in list output, and setting an ACL on such a file creates a file-specific ACL.
 
+Independent review produced two additional, separately reviewable fixes after the original hardening commit:
+
+- Commit `029ddb12bdd627601e709bd91d9dc5e801624594` makes `Afs::copyFiles()` and recursive `copy_dirs()` share a link-first dispatcher. Directory symlinks and broken links are reproduced as links, direct `copy_dirs()` calls reject a symlink source, and FIFO or other unsupported file types fail without creating a destination. These helpers remain dormant from Tiny File Manager's active data plane and retain same-device and check/use limitations.
+- The same commit makes the ACL parser explicitly recognize the AuriStor `Volume access list for ... is` boundary and fail closed instead of exposing any following MaxACL entries as editable object ACL entries. Until a separate read-only MaxACL model is implemented and validated live, ACL editing is disabled on volumes whose `fs listacl` output includes this block.
+
+The reported nested-key principal mangling was retracted after PHP 7.4 and 8.3 reproduced dotted and spaced principals intact. A regression fixture records that behavior; the keyed ACL form was not changed without a failing case.
+
+Commit `6cdef50404babb797965d152e501b4c5500f61a8` converts single copy, move, and duplicate completion from a state-changing GET link to a token-verified POST form. This was a pre-existing canonical-upstream issue relevant to ambient SSO, not a conflict or regression introduced by the AFS replay.
+
 The no-live-mount regression layer is intentionally separate as well:
 
-- `tests/afs_regression.php` exercises ACL parsing and command construction, case-sensitive auxiliary rights, inherited ACLs, caller-access flags, path/device rejection, handle-time copy/read checks, broken symlinks, and helper inventory without touching `/afs`.
-- `tests/afs_static.php` checks default-off/config ordering, conditional `__DIR__` loading, retained upstream CSRF/URL-upload/exclusion controls, normal and negative ACL handling, all 15 rights, inherited-ACL gates, `k` mapping, batching, and one `getcalleraccess` call per listed item.
+- `tests/afs_regression.php` exercises ACL parsing and command construction, MaxACL fail-closed behavior, case-sensitive auxiliary rights, inherited ACLs, dotted/spaced principal keys, caller-access flags, path/device rejection, handle-time copy/read checks, directory and broken symlinks, unsupported special files, and helper inventory without touching `/afs`.
+- `tests/afs_static.php` checks default-off/config ordering, conditional `__DIR__` loading, retained upstream CSRF/URL-upload/exclusion controls, token-verified POST completion for single copy/move/duplicate, normal and negative ACL handling, all 15 rights, inherited-ACL gates, `k` mapping, batching, and one `getcalleraccess` call per listed item.
 - `tests/afs_io_path_audit.php` inventories the generic endpoints. Until they are integrated, it records exact expected failures for save/backup, create, copy/duplicate, move/rename, delete, uploads, download/view/direct links, archives, symlink traversal, and mount-point traversal. An expected-failure audit must fail if the unsafe baseline changes unexpectedly; it must never silently convert an untested path into a pass.
 - Run PHP lint on `tinyfilemanager.php`, `afs.php`, and every PHP test, followed by all three focused suites and any available upstream checks.
 
-The focused suite passed under PHP 7.4 and PHP 8.3: 46 regression assertions, 124 static assertions, and 80 I/O-path checks. The I/O audit reports four protected primitives, two fail-closed gates, 18 intentional expected failures, and zero unexpected failures. The PHP 7.4 run used the official `php:7.4-cli-alpine` image at digest `sha256:0d67d81f60f4a400f1b68e3a41e910c98c5e08f49e515f6855561a0f24d37852`.
+The original focused suite passed under PHP 7.4 and PHP 8.3. After the independent-review fixes, PHP 8.3 passes 68 regression assertions, 138 static assertions, and 84 I/O-path checks. The I/O audit still reports four protected primitives, two fail-closed gates, 18 intentional expected failures, and zero unexpected failures. PHP 7.4 independently passes the dotted/spaced nested-key fixture, but the complete updated tree was not rerun under 7.4 because the managed environment rejected mounting this private worktree into the generic public image. The earlier full PHP 7.4 run used `php:7.4-cli-alpine` at digest `sha256:0d67d81f60f4a400f1b68e3a41e910c98c5e08f49e515f6855561a0f24d37852`.
 
 Static tests can validate dispatch, parsing, escaping, and fail-closed behavior, but they cannot validate PAG/token inheritance, AFS kernel behavior, ACL enforcement, mount points, volume boundaries, or the deployed `fs` output. Those claims require the disposable live plan in `docs/LIVE_AFS_TEST_PLAN.md`.
 
@@ -161,4 +172,4 @@ Static tests can validate dispatch, parsing, escaping, and fail-closed behavior,
 
 The hardening commit repairs the actively integrated ACL surface and several dormant helpers; it does not wire Tiny File Manager's generic data plane into those helpers. A blanket AFS/AuriStor compatibility claim therefore remains blocked by all 18 expected-failure routes in `tests/afs_io_path_audit.php`, including direct links, archive operations, symlink traversal, and mount-point traversal.
 
-Additional live-only blockers are web-worker token/PAG identity, real OpenAFS and AuriStor `fs` output, file-versus-directory ACL semantics, same- and cross-volume behavior, unavailable/read-only mounts, and writeback failures. Positive and negative ACL sets require separate `fs` commands, so a failure between the two batches can still leave a partial cross-set update; that failure mode must be exercised and documented live. The upstream Dockerfile copies only `tinyfilemanager.php`, not `afs.php`, so its image is ordinary default-off Tiny File Manager rather than an AFS-capable deployment artifact. Data-plane wiring and AFS container packaging should be developed on distinct follow-on branches so the historical replay and ACL hardening remain reviewable.
+Additional live-only blockers are web-worker token/PAG identity, real OpenAFS and AuriStor `fs` output, file-versus-directory ACL semantics, MaxACL display/edit policy, same- and cross-volume behavior, unavailable/read-only mounts, and writeback failures. Positive and negative ACL sets require separate `fs` commands, so a failure between the two batches can still leave a partial cross-set update; that failure mode must be exercised and documented live. The upstream Dockerfile copies only `tinyfilemanager.php`, not `afs.php`, so its image is ordinary default-off Tiny File Manager rather than an AFS-capable deployment artifact. Data-plane wiring and AFS container packaging should be developed on distinct follow-on branches so the historical replay and ACL hardening remain reviewable.

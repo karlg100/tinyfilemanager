@@ -112,6 +112,7 @@ For both a directory and a regular file path, while recording whether the implem
 10. Capture raw OpenAFS and AuriStor CLI output separately if both implementations are supported. Parser success on one is not evidence for the other.
 11. On AuriStor, create a file with an inherited ACL. Verify that the UI identifies it as inherited, disables submission, and that a crafted POST is rejected without converting it to a file-specific ACL. If explicit conversion is tested separately, record the exact command and use the client-supported ACL-removal operation to restore inheritance.
 12. Populate multiple positive and negative ACEs and verify one `fs` invocation per set. Force the second set to fail after the first succeeds; record the partial-update behavior and restore the exact baseline before continuing.
+13. Apply a disposable Volume Maximum ACL and capture the exact raw `fs listacl` output. The current implementation must report the ACL as unreadable and reject a crafted mutation without changing either the object ACL or MaxACL. A future parser may display MaxACL entries read-only, but must never post them as object ACL entries or calculate effective rights without server evidence.
 
 A negative ACE alone is not proof of denial when `anonymous` or `system:anyuser` grants the same right. Include authenticated and token-discarded anonymous requests, and treat the observed effective operation—not the checkbox—as the authorization result.
 
@@ -130,8 +131,8 @@ Exercise each row as an allowed Editor, a Reader expected to be denied, and wher
 | URL upload | direct HTTP(S), redirects, rejected loopback/port, configured restricted proxy, failed transfer and temp cleanup | application and proxy logs, resolved destination, final hash, no internal-network reachability |
 | View/download | text, binary, zero/large file, byte-range request, image/media preview, missing and denied file | status/headers, byte-for-byte hash, token behavior, session behavior |
 | Direct link | regular file and directory under each identity | web-server authorization result; record that PHP cannot confine or authorize a direct link |
-| Copy/duplicate | file/tree, existing target, same-directory duplicate, copy into a direct and deep descendant, large/partial-write case, quota/writeback failure, symlink cases | source/destination hashes/types/targets, error atomicity, partial cleanup, confinement |
-| Move/rename | file/tree, same volume, cross volume, existing target, symlink, denied destination | source/destination state, expected cross-volume error or documented fallback, no loss |
+| Copy/duplicate | file/tree, existing target, same-directory duplicate, copy into a direct and deep descendant, large/partial-write case, quota/writeback failure, symlink cases, missing/invalid CSRF token and cross-site GET completion | source/destination hashes/types/targets, CSRF rejection with no mutation, error atomicity, partial cleanup, confinement |
+| Move/rename | file/tree, same volume, cross volume, existing target, symlink, denied destination, missing/invalid CSRF token and cross-site GET completion | source/destination state, CSRF rejection with no mutation, expected cross-volume error or documented fallback, no loss |
 | Delete | file, empty/non-empty tree, batch selection, symlink, broken link, mount point | exact removed objects, sentinel preservation, no traversal into target/mounted volume |
 | Archive create | zip/tar one and many files, nested tree, symlink, child volume, denied member | member list, hashes, omissions/errors, no unexpected traversal |
 | Archive extract | zip/tar normal, overwrite, `../`, absolute path, symlink entry, extraction through symlink or mount point | destination manifest and proof that both escape sentinels remain unchanged |
@@ -195,7 +196,7 @@ An AFS/AuriStor compatibility claim requires all of the following:
 
 - no PHP lint, static-test, upstream-check, warning, or parser failures;
 - proven web-worker identity and token/PAG isolation for each authorization role;
-- exact normal and negative ACL round trips for standard `lrwidka` and AuriStor `A-H`, preserved inherited ACLs, correct `k` handling, CSRF rejection, and enforcement evidence;
+- exact normal and negative ACL round trips for standard `lrwidka` and AuriStor `A-H`, preserved inherited ACLs, fail-closed MaxACL behavior, correct `k` handling, CSRF rejection, and enforcement evidence;
 - every claimed I/O route tested in both allowed and denied cases with no unexplained partial state;
 - no outside-root read or mutation through symlinks, archives, mount points, direct links, or cross-volume operations;
 - documented, acceptable behavior for file ACL requests, read-only volumes, token expiry, unavailable mounts, and cross-volume moves;
