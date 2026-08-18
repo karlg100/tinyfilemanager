@@ -2,7 +2,7 @@
 
 ## Scope and provenance
 
-The AFS-enhanced fork was replayed onto the fetched canonical Tiny File Manager tip without rewriting any remote-tracking ref and without force-pushing.
+The AFS-enhanced fork was replayed onto the fetched canonical Tiny File Manager tip without rewriting any remote-tracking ref. Its seven branch-local commits were later recreated to correct author and committer email metadata, then published with an explicitly authorized force-with-lease. Named safety refs retain both earlier histories.
 
 ```text
 origin   https://github.com/karlg100/tinyfilemanager.git
@@ -16,23 +16,36 @@ branch   kag/afs-rebase-upstream-20260817
 | Historical proxy commit | `da98b2aa88d9ba2df7c2d67578710faec4431c3e` |
 | Historical AFS tip | `194b4d034e99e6ad20c99bb31ea512f12a9a916b` |
 | Rebase target (`upstream/master`) | `41491439a6b243c55502581e53fad20bc4c6e777` |
-| Replayed proxy commit | `a2df5e893041a3e18134299058f7aa74ccda96d9` |
-| Replayed AFS commit | `ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1` |
-| Post-rebase AFS hardening | `be98d299ec262e34bb2b759b7742c3dfc18bd3af` |
-| Independent-review AFS fix | `029ddb12bdd627601e709bd91d9dc5e801624594` |
-| Pre-existing upstream CSRF fix | `6cdef50404babb797965d152e501b4c5500f61a8` |
+| Replayed proxy commit | `9940e0e56b76ec41bf12a639d321d5afe094aa4f` |
+| Replayed AFS commit | `8fd26cbf61e26fdc9831a83cfbb5b777f63f21c7` |
+| Post-rebase AFS hardening | `7ea1040cd3d7c6c2b12c5949c8f4604bf72a87b0` |
+| Independent-review AFS fix | `a3241138bea6f400534bb5a56c0c81944be08001` |
+| Pre-existing upstream CSRF fix | `744c8eb07b024e6208f75ec6585da66f0ec8f0a9` |
 
 The authoritative old-to-new mapping is:
 
 ```text
-da98b2aa88d9ba2df7c2d67578710faec4431c3e -> a2df5e893041a3e18134299058f7aa74ccda96d9
-194b4d034e99e6ad20c99bb31ea512f12a9a916b -> ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1
+da98b2aa88d9ba2df7c2d67578710faec4431c3e -> 9940e0e56b76ec41bf12a639d321d5afe094aa4f
+194b4d034e99e6ad20c99bb31ea512f12a9a916b -> 8fd26cbf61e26fdc9831a83cfbb5b777f63f21c7
 ```
 
-The pre-rebase AFS tip is retained at:
+All seven branch-local commits were subsequently recreated with author and committer email `karl@grindleyfamily.com`. Names, trees, raw messages, dates, ordering, and parent topology were preserved. The email-only object mapping is:
+
+```text
+a2df5e893041a3e18134299058f7aa74ccda96d9 -> 9940e0e56b76ec41bf12a639d321d5afe094aa4f
+ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1 -> 8fd26cbf61e26fdc9831a83cfbb5b777f63f21c7
+be98d299ec262e34bb2b759b7742c3dfc18bd3af -> 7ea1040cd3d7c6c2b12c5949c8f4604bf72a87b0
+53b5501ed3ab55aef70d720b77e6e4ea8c21c339 -> ab4ca69009ecbb5a9bd73225d25f97065bcd60b9
+029ddb12bdd627601e709bd91d9dc5e801624594 -> a3241138bea6f400534bb5a56c0c81944be08001
+6cdef50404babb797965d152e501b4c5500f61a8 -> 744c8eb07b024e6208f75ec6585da66f0ec8f0a9
+f4302bed20e7514fefdc8e6b0d785b5b8c8848a5 -> 502ac7013d4f307b7c3a58a1ecb3a09b9a0d8ddb
+```
+
+The historical fork tip and the complete pre-email-rewrite branch are retained at:
 
 ```text
 refs/heads/safety/afs-pre-rebase-194b4d0-20260817
+refs/heads/safety/afs-pre-email-rewrite-f4302be-20260817
 ```
 
 Useful provenance checks are:
@@ -40,11 +53,11 @@ Useful provenance checks are:
 ```sh
 git range-diff --creation-factor=100 \
   2f357ee3d524f1085a7ca2707776c0f33ef85835..194b4d034e99e6ad20c99bb31ea512f12a9a916b \
-  41491439a6b243c55502581e53fad20bc4c6e777..ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1
+  41491439a6b243c55502581e53fad20bc4c6e777..8fd26cbf61e26fdc9831a83cfbb5b777f63f21c7
 
 git diff --exit-code \
   194b4d034e99e6ad20c99bb31ea512f12a9a916b:afs.php \
-  ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1:afs.php
+  8fd26cbf61e26fdc9831a83cfbb5b777f63f21c7:afs.php
 ```
 
 The second command is clean: `afs.php` in the replay commit is byte-for-byte the historical file. Any later `afs.php` hardening is intentionally a post-rebase change, not a rewritten historical commit. Because the proxy patch was adapted around substantial upstream changes, `git range-diff` may show it as an old deletion plus a new addition; the explicit mapping above records its provenance.
@@ -117,7 +130,7 @@ Preserving these controls is not a claim that upstream has complete symlink-safe
 
 ## Compatibility blockers at the replay boundary
 
-Do not claim general AFS/AuriStor compatibility from `ed6cc37` alone.
+Do not claim general AFS/AuriStor compatibility from `8fd26cb` alone.
 
 1. Tiny File Manager calls only `Afs::changeAcl()`, `Afs::readAcl()`, and `Afs::getACLAccess()`. Its forms do not use the legacy `command`, `formKey`, `selectedItems`, or `originPath` protocol. The AFS-safe copy, recursive copy/delete, move, and read helpers in `afs.php` are therefore dormant.
 2. Save, backup, create, copy/duplicate, move/rename, delete, upload/chunked upload/URL upload, download, view, direct links, and archive paths still use generic upstream I/O. A lexical `FM_PATH` check does not stop an in-root symlink from reaching an AFS path outside `FM_ROOT_PATH` or a local filesystem path. Direct links bypass PHP entirely.
@@ -131,9 +144,9 @@ Do not claim general AFS/AuriStor compatibility from `ed6cc37` alone.
 
 ## Post-rebase fixes and automated tests
 
-The two mapped commits above are the historical replay layer and should remain unchanged. Hardening and tests belong in one or more commits after `ed6cc37` so `git range-diff` continues to show what was replayed versus what was newly repaired.
+The two mapped commits above are the historical replay layer and should remain unchanged. Hardening and tests belong in one or more commits after `8fd26cb` so `git range-diff` continues to show what was replayed versus what was newly repaired.
 
-Commit `be98d299ec262e34bb2b759b7742c3dfc18bd3af` implements the separately reviewable production hardening:
+Commit `7ea1040cd3d7c6c2b12c5949c8f4604bf72a87b0` implements the separately reviewable production hardening:
 
 - fail-closed AFS availability, path, stat, command-execution, and parser handling;
 - removal of constructor request/shell side effects and exactly one explicit access lookup per listed item;
@@ -150,12 +163,12 @@ The case and inheritance handling follows the AuriStor [`fs listacl`](https://ww
 
 Independent review produced two additional, separately reviewable fixes after the original hardening commit:
 
-- Commit `029ddb12bdd627601e709bd91d9dc5e801624594` makes `Afs::copyFiles()` and recursive `copy_dirs()` share a link-first dispatcher. Directory symlinks and broken links are reproduced as links, direct `copy_dirs()` calls reject a symlink source, and FIFO or other unsupported file types fail without creating a destination. These helpers remain dormant from Tiny File Manager's active data plane and retain same-device and check/use limitations.
+- Commit `a3241138bea6f400534bb5a56c0c81944be08001` makes `Afs::copyFiles()` and recursive `copy_dirs()` share a link-first dispatcher. Directory symlinks and broken links are reproduced as links, direct `copy_dirs()` calls reject a symlink source, and FIFO or other unsupported file types fail without creating a destination. These helpers remain dormant from Tiny File Manager's active data plane and retain same-device and check/use limitations.
 - The same commit makes the ACL parser explicitly recognize the AuriStor `Volume access list for ... is` boundary and fail closed instead of exposing any following MaxACL entries as editable object ACL entries. Until a separate read-only MaxACL model is implemented and validated live, ACL editing is disabled on volumes whose `fs listacl` output includes this block.
 
 The reported nested-key principal mangling was retracted after PHP 7.4 and 8.3 reproduced dotted and spaced principals intact. A regression fixture records that behavior; the keyed ACL form was not changed without a failing case.
 
-Commit `6cdef50404babb797965d152e501b4c5500f61a8` converts single copy, move, and duplicate completion from a state-changing GET link to a token-verified POST form. This was a pre-existing canonical-upstream issue relevant to ambient SSO, not a conflict or regression introduced by the AFS replay.
+Commit `744c8eb07b024e6208f75ec6585da66f0ec8f0a9` converts single copy, move, and duplicate completion from a state-changing GET link to a token-verified POST form. This was a pre-existing canonical-upstream issue relevant to ambient SSO, not a conflict or regression introduced by the AFS replay.
 
 The no-live-mount regression layer is intentionally separate as well:
 
