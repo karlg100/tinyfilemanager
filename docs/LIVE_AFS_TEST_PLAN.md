@@ -2,7 +2,9 @@
 
 ## Objective and claim boundary
 
-This plan validates the AFS-enhanced Tiny File Manager against a real OpenAFS or AuriStor client. It is the required complement to static tests. A successful static run alone is not evidence that tokens reach the web worker, ACLs are enforced, symlinks are confined, or operations behave correctly across volume mount points.
+This plan validates the AFS-enhanced Tiny File Manager against a real OpenAFS or AuriStor client. It is the required complement to static tests. A successful static run alone is not evidence that tokens reach the web worker, ACLs are enforced, symlinks are confined, a descriptor boundary survives races, or operations behave correctly across volume mount points.
+
+The data-plane follow-on lane is deliberately not deployable with its bundled `AfsDataPlane`: that pathname-based class returns `false` from `isProductionReady()`. A live data-plane run may begin only after the candidate includes a separately reviewed descriptor-backed `AfsDataPlaneProvider` (or equivalent native broker) and the application accepts and initializes it. Overriding the readiness boolean without implementing and reviewing the boundary is not a test setup; it is a bypass. Until that prerequisite exists, only the readiness-failure, ACL, and mount-free tests can run, and no AFS data-plane compatibility claim is possible.
 
 Run this plan only against disposable data and identities. The preferred fixture is a dedicated read-write test volume plus a second disposable volume for cross-volume tests. Never point `FM_ROOT_PATH` at a production volume, user home, shared project tree, or cell root.
 
@@ -14,6 +16,7 @@ Run this plan only against disposable data and identities. The preferred fixture
 - Place a run-ID marker file at each test root. Destructive cleanup is permitted only after the operator verifies the marker, expected volume/FID, and exact path.
 - Prefer a disposable volume snapshot/clone before destructive cases. Otherwise create a timestamped archive, file hash manifest, mount-point inventory, and complete ACL baseline.
 - Stop immediately if an HTTP operation reads, changes, creates, renames, archives, downloads, or deletes anything outside the dedicated roots; if the web worker has an unexpected identity; or if a mount point resolves to a non-disposable volume.
+- Stop if a rendered AFS page emits a raw managed-file URL, contacts an online document viewer, loads an unreviewed remote executable/style/media asset, or permits the web server to serve a guessed managed path without Tiny File Manager authorization.
 - Treat a timeout, PHP warning, `fs` parse failure, or unexplained empty ACL as a failure, not as a skipped check.
 
 Suggested logical names are:
@@ -33,13 +36,14 @@ Substitute explicit, reviewed paths in commands. Do not use an unset variable, w
 Create a timestamped evidence directory outside all test roots and record:
 
 - `git rev-parse HEAD`, `git status --short`, the old/new mapping, and the safety-ref object ID;
-- container or VM image identity, web-server and PHP versions, loaded PHP extensions, and relevant PHP limits;
+- container or VM image identity, web-server and PHP versions, loaded PHP extensions, relevant PHP limits, and the exact production-provider artifact and build identity;
 - AFS/AuriStor client and `fs` versions, mount configuration, cell name, cache-manager status, and server/volume identity;
 - exact test-root, escape-root, mount-point, volume, FID, and canonical-path results;
-- sanitized application configuration and checksums of deployed source files;
+- sanitized application configuration and checksums of deployed source, provider, local JavaScript/CSS/font/worker assets, and configuration files;
 - process UID/GID/groups, SELinux/AppArmor state if applicable, and web service start command;
 - token issuer, principal names, PAG identifiers, token expiry times, and `fs getcalleraccess` results, but never token material;
 - recursive file inventory with types, sizes, timestamps, hashes for regular files, symlink targets, and ACLs for every directory;
+- the response CSP, rendered HTML, browser console, complete browser network trace, canonical external origin, accepted/rejected Host and forwarded-host inputs, and web-server static-location configuration;
 - web access/error logs and PHP logs from a clean starting point.
 
 Keep command output in raw text as well as a short result table. Record the HTTP request, identity, expected result, actual result, and resulting filesystem/ACL delta for every case.
@@ -68,18 +72,59 @@ Repeat the authorization subset as Editor, Reader, and Denied principal using ne
 
 ## Deployment under test
 
-Deploy the exact candidate commit into the disposable web root. Back up the original test configuration, then set at least:
+Deploy the exact candidate commit and the separately reviewed production-provider artifact into the disposable web root. `afs_contract.php` is mandatory and must be verified as a reviewed application blob before `config.php` loads the provider. Back up the original test configuration, then set at least:
 
 ```php
+define('AFS_PRODUCTION_PROFILE', 'afs-descriptor-v1');
 $afsSupport = true;
+$afs_external_auth = true;
+$use_auth = false;
+$auth_users = array();
+$readonly_users = array();
+$directories_users = array();
+$settings_enabled = false;
+$direct_links_enabled = false;
+$raw_previews_enabled = false;
 $root_path = '/afs/<reviewed-disposable-path>';
+$root_url = '';
+$online_viewer = false;
+$favicon_path = '';
+$external_asset_root = __DIR__ . '/<reviewed-local-asset-root>';
+$afs_asset_manifest_file = 'relative/path/to/afs-assets-v1.json';
+$afs_asset_manifest_sha256 = '<lowercase-sha256-of-exact-manifest-bytes>';
+$content_security_policy = "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; media-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'; worker-src 'self'";
+$content_security_policy_approved = true;
+require_once __DIR__ . '/<reviewed-provider-artifact>.php';
+$afsDataPlaneFactory = new ReviewedAfsDataPlaneProviderFactory();
+$afs_expected_factory_class = 'ReviewedAfsDataPlaneProviderFactory';
+$afs_expected_factory_id = 'site.factory:sha256:<reviewed-lowercase-hash>';
+$afs_expected_provider_class = 'ReviewedAfsDataPlaneProvider';
+$afs_expected_provider_id = 'site.provider:sha256:<reviewed-lowercase-hash>';
 ```
 
-Do not assume the upstream Dockerfile is the candidate deployment: it copies only `tinyfilemanager.php` and omits `afs.php`. If a container is used, build or mount an explicitly reviewed AFS-capable artifact and record both source-file checksums.
+Do not use that configuration with the bundled `AfsDataPlane`, a test double, or a provider whose only production change is returning `true` from `isProductionReady()`. The provider must own resolution, metadata, ACLs, and I/O through a descriptor-relative `RESOLVE_BENEATH`/no-magic-link boundary, initially rejecting POSIX symlinks, or an independently reviewed equivalent broker. Exact class/build IDs and provider-reported credential equality prevent accidental substitution but do not prove the implementation, token, or check/use boundary. Review the provider artifact and every call site together.
 
-Keep application authentication enabled unless the production design explicitly delegates authentication to the front-end server. Restrict the endpoint by network policy as well. Begin with URL proxying unset. If proxy behavior is in scope, test it later with a dedicated restricted proxy and record its DNS, redirect, and egress policy.
+The one canonical JSON manifest must validate against `docs/AFS_ASSET_MANIFEST.schema.json` and be the same artifact the container lock consumes. Its exact raw bytes are pinned by `$afs_asset_manifest_sha256` and hashed before JSON parsing. It has version 1 and exactly ten logical asset rows. Each row binds type, relative local path, lowercase SHA-256, reviewed license, and boolean `defer`; style rows require `defer: false`. Do not generate an independent PHP manifest or container-only lock. Only a container-pinned, root-owned, non-writable manifest and asset tree makes these hashes a trust anchor; application validation alone cannot prevent an authorized writer from replacing both config and bytes. Every transitive dependency loaded by CSS, Font Awesome, ACE modes/themes/workers, Dropzone, DataTables, or Highlight.js must also be in the reviewed image/lock. The application validates the top-level files but cannot prove transitive browser loads, URL-to-file mapping, MIME, or served bytes; collect that evidence in the browser and web-server lanes. Keep the favicon empty or bind it to its separate lowercase SHA-256.
 
-Before using the browser, run PHP lint and the no-live-mount suites against the deployed source. Confirm the page loads without PHP warnings and that AFS mode is actually enabled. Verify that disabling `$afsSupport` restores ordinary upstream behavior without loading `afs.php`.
+PHP is the only CSP-header source. The exact 13-directive policy above is required and rejects remote, wildcard, unsafe-inline/eval, and noncanonical variants. Do not add a second Apache CSP header. The application still contains inline templates, so `applicationTemplatesSupportStrictCsp()` intentionally makes this configuration return 503 until a reviewed nonce/hash/external-template refactor exists. A live positive data-plane run cannot start before that blocker is resolved; readiness-failure tests must prove the stop remains effective meanwhile.
+
+AFS mode forces the Google/Microsoft online viewer off, suppresses raw image/audio/video and hover previews, and disables file/folder DirectLink controls. Ordinary controller-mediated navigation, view, and download remain. Confirm that a pre-defined non-false `FM_DOC_VIEWER` or enabled settings/direct/raw constant produces the expected 503, then inspect the rendered response and network trace rather than relying on variables alone. `FM_ROOT_URL` must be empty and `FM_SELF_URL` root-relative. Configure the web server to deny guessed static URLs below the managed root even though the UI no longer emits them.
+
+Do not assume the upstream Dockerfile is the candidate deployment: it copies only `tinyfilemanager.php` and omits `afs_contract.php`, `afs.php`, the production provider, manifest/schema, reviewed local assets, and AFS configuration. If a container is used, build or mount an explicitly reviewed AFS-capable artifact and record every component checksum, including the provider contract. The container must expose the intended AFS mount and mount inventory to the worker, supply `/usr/bin/fs` and required PHP extensions, preserve the intended UID/PAG/token, serve the local assets, verify the application-owned CSP, pin the canonical external origin and reject untrusted Host/forwarded-host inputs, sanitize trusted proxy headers, and enforce static-file and URL-upload egress policy.
+
+Keep the application and container changes reviewable as separate commits, but treat them as one security boundary. The application lane cannot validate the deployed mount, identity, assets, CSP, or static web-server rules. The container lane cannot repair provider dispatch, pathname races, CSRF, or raw-URL generation. Neither lane can claim compatibility until the combined image passes this plan.
+
+The production profile requires front-end external authentication, disables Tiny File Manager local auth, removes all local/readonly/per-user accounts, and rejects a missing `REMOTE_USER`. That structural check does not prove Apache authenticated before PHP/session/CSRF handling, that the header cannot be spoofed, or that the provider uses the same PAG/token. The exact image must prove those semantics and retain a complete mod_auth/authz/header-trust configuration. Restrict the endpoint by network policy as well. Begin with URL proxying unset. If proxy behavior is in scope, test it later with a dedicated restricted proxy and record its DNS, redirect, and egress policy.
+
+Before using the browser, run PHP lint and every no-live-mount suite against the deployed source. Verify the readiness matrix separately: ordinary upstream mode still works with `$afsSupport = false`; AFS enabled without the immutable profile; profile with AFS disabled; local auth/users; missing external identity; embed/settings/direct/raw enablement; a root outside `/afs`, unnormalized root, or conflicting pre-defined `FM_ROOT_PATH`; raw/absolute URLs; missing contract; bad factory/provider class, build, credential identity, boundary, readiness, or initialization; missing/uppercase/mismatched manifest digest; invalid manifest/assets/hashes/licenses; invalid CSP/approval; and current inline templates each produce a 503 with no file operation. Confirm the exact expected blocker is reported, without PHP warnings or fallback.
+
+After startup, request login, listing, upload, view, edit, help, and error pages and record for each:
+
+- the CSP header and any browser CSP violation;
+- every script, stylesheet, font, worker, image, media, iframe, favicon, preconnect, and DNS-prefetch request;
+- absence of Google/Microsoft viewer requests and raw managed-file URLs;
+- denial of guessed static file and directory URLs by the web server; and
+- identical reviewed asset checksums in the image and HTTP responses.
 
 ## Fixture layout
 
@@ -120,22 +165,31 @@ Restore the ACL baseline after this matrix before starting data-plane tests.
 
 ## Data-plane operation matrix
 
-Exercise each row as an allowed Editor, a Reader expected to be denied, and where meaningful the Denied principal. After every request, compare the full test-root and escape-root manifests.
+The current audit has 24 classifications and no compatibility-pass status:
 
-| Area | Cases to execute | Required evidence |
-| --- | --- | --- |
-| Listing/navigation | root and nested navigation, parent link, hidden items, exclusions, search, large directory | HTTP result, displayed names/access, raw listing, timing, `fs` call count |
-| Create | new file, empty file, directory, nested directory, invalid/NUL/path-like name, existing target | status/message, type/mode/FID, no outside-root delta |
-| Edit/save | plain editor, ACE/AJAX save, empty content, large content, failed write, backup | before/after hash and length, CSRF result, absence of partial data |
-| Upload | single file, overwrite/collision, zero/large file, disallowed extension, nested folder upload, chunked upload and interrupted chunk cleanup | request/chunk log, final hash/FID, `.part` cleanup, destination confinement |
-| URL upload | direct HTTP(S), redirects, rejected loopback/port, configured restricted proxy, failed transfer and temp cleanup | application and proxy logs, resolved destination, final hash, no internal-network reachability |
-| View/download | text, binary, zero/large file, byte-range request, image/media preview, missing and denied file | status/headers, byte-for-byte hash, token behavior, session behavior |
-| Direct link | regular file and directory under each identity | web-server authorization result; record that PHP cannot confine or authorize a direct link |
-| Copy/duplicate | file/tree, existing target, same-directory duplicate, copy into a direct and deep descendant, large/partial-write case, quota/writeback failure, symlink cases, missing/invalid CSRF token and cross-site GET completion | source/destination hashes/types/targets, CSRF rejection with no mutation, error atomicity, partial cleanup, confinement |
-| Move/rename | file/tree, same volume, cross volume, existing target, symlink, denied destination, missing/invalid CSRF token and cross-site GET completion | source/destination state, CSRF rejection with no mutation, expected cross-volume error or documented fallback, no loss |
-| Delete | file, empty/non-empty tree, batch selection, symlink, broken link, mount point | exact removed objects, sentinel preservation, no traversal into target/mounted volume |
-| Archive create | zip/tar one and many files, nested tree, symlink, child volume, denied member | member list, hashes, omissions/errors, no unexpected traversal |
-| Archive extract | zip/tar normal, overwrite, `../`, absolute path, symlink entry, extraction through symlink or mount point | destination manifest and proof that both escape sentinels remain unchanged |
+- **19 transitional:** provider-wired data, metadata, ACL, navigation/search, and readiness surfaces that still lack the native boundary/live evidence;
+- **4 guarded-disabled:** DirectLink controls, archive creation, archive extraction, and raw protected URLs/external viewers;
+- **1 live-YFS:** AFS volume-mount traversal and mutation semantics;
+- **0 protected and 0 XFAIL.**
+
+Within the original 18 routes, the split is 14 transitional, 3 guarded-disabled, and 1 live-YFS. “Transitional” means a provider-aware call site exists, not that the descriptor boundary or live behavior passed. “Guarded-disabled” means the UI and crafted requests must remain unavailable before any generic code runs. DirectLink is disabled; exercise ordinary view/download/navigation separately.
+
+Exercise each transitional row as an allowed Editor, a Reader expected to be denied, and where meaningful the Denied principal. After every request, compare the full test-root and escape-root manifests. For a guarded-disabled row, send both the ordinary UI request (if any control remains) and a crafted request, then prove that the complete manifests are unchanged.
+
+| State | Area | Cases to execute | Required evidence |
+| --- | --- | --- | --- |
+| Transitional | Listing/navigation/search | root and nested navigation, parent link, hidden items, exclusions, literal-metacharacter search, large directory, concurrent link-swap attempt | HTTP result, displayed names/access, raw listing, timing, `fs` call count, provider trace, no path-only fallback |
+| Transitional | Create | new file, empty file, directory, nested directory, invalid/NUL/path-like name, existing target, concurrent parent/leaf replacement | status/message, type/mode/FID, provider trace, no outside-root delta |
+| Transitional | Edit/save/backup | plain fallback and ACE/AJAX save, empty/large content, failed/short write, backup, concurrent replacement | before/after hash and length, CSRF result, descriptor/provider trace, absence of partial data |
+| Transitional | Upload | single file, overwrite/collision, zero/large file, disallowed extension, nested folder upload, chunked upload, reordered/retried chunks, interrupted cleanup | request/chunk log, final hash/FID, `.part` cleanup, descriptor/provider trace, destination confinement |
+| Transitional | URL upload | direct HTTP(S), redirects, rejected loopback/port/private address, configured restricted proxy, failed transfer and temp cleanup | application/proxy/DNS logs, resolved destination, final hash, no internal-network reachability, confined import trace |
+| Transitional | View/download | text, binary, zero/large file, valid/invalid/suffix/multiple byte ranges, missing and denied file | status/headers, byte-for-byte hash, token/session behavior, descriptor/provider trace; raw image/audio/video preview remains absent |
+| Guarded-disabled | DirectLink/raw URLs | verify no DirectLink control, send crafted/guessed raw static URLs under every identity | no direct action emitted; explicit PHP/profile rejection where applicable; web-server denial and no managed bytes |
+| Transitional | Copy/duplicate | file/tree, existing target, same-directory duplicate, direct/deep descendant, large/partial-write case, quota/writeback failure, race, missing/invalid CSRF token | source/destination hashes/types, provider trace, CSRF rejection, error atomicity, partial cleanup, confinement |
+| Transitional | Move/rename | file/tree, same volume, cross volume, existing target, race, denied destination, missing/invalid CSRF token | source/destination state, provider trace, CSRF rejection, explicit cross-volume failure or reviewed fallback, no loss |
+| Transitional | Delete | file, empty/non-empty tree, single/batch selection, race, symlink, broken link, kernel mount, AFS volume mount point | exact removed objects, provider preflight/trace, sentinel preservation, no traversal into link or mounted volume |
+| Guarded-disabled | Archive create | ordinary and crafted ZIP/TAR requests over files, trees, symlinks, child volumes, and denied members | control absent or disabled, explicit rejection before `FM_Zipper`/`PharData`, no archive and no manifest delta |
+| Guarded-disabled | Archive extract | ordinary and crafted ZIP/TAR requests including overwrite, `../`, absolute path, symlink entry, and mount/link destinations | explicit rejection before `extractTo`, no destination creation, both escape sentinels and full manifest unchanged |
 
 Also exercise every single-item and batch route separately; they do not necessarily share implementation. A route that passes only because the kernel denied it is not equivalent to application-level confinement. Record both layers.
 
@@ -151,13 +205,14 @@ Create each link as both a file-facing and directory-facing case where possible:
 - broken link;
 - two-link chain and a loop.
 
-For every link, test list, navigate, view, edit/save, backup, upload through a linked directory, download, direct link, copy, duplicate, move/rename, single delete, batch delete, archive create, and archive extraction. The required confinement result is:
+For every link, test list, navigate, view, edit/save, backup, upload through a linked directory, download, former direct-link actions, copy, duplicate, move/rename, single delete, batch delete, archive create, and archive extraction. The required confinement result is:
 
-- an operation may act on the link itself where that is the documented intent;
-- no operation may follow a link outside `FM_ROOT_PATH` for read or write;
-- recursive operations must detect loops and must not traverse an outside target;
-- deletion of a link must not delete its target;
-- direct-link exposure must be blocked by web-server configuration or documented as unsupported, because the PHP AFS wrapper cannot mediate it.
+- all content reads, writes, navigation, search, copy, and upload through a POSIX link fail closed; the initial production-provider contract does not follow even an in-root POSIX link;
+- listing may expose only provider-returned no-follow link metadata and must not obtain `readlink` data through an independently resolved pathname;
+- acting on the link object itself, such as unlink or rename, is permitted only if the reviewed broker binds the parent and leaf to a no-follow descriptor operation; otherwise it must also fail closed;
+- recursive operations must reject the link before traversal, deletion must never affect its target, and link chains or loops must not cause a hang;
+- archive create/extract remains guarded-disabled for both ordinary and crafted requests; and
+- DirectLink controls must remain absent; ordinary PHP view/navigation remains provider-mediated, while the web server denies guessed raw URLs for both the link and its target.
 
 Any outside-root read or write is a release blocker. Preserve the fixture and logs for diagnosis; do not continue destructive cases.
 
@@ -165,14 +220,15 @@ Any outside-root read or write is a release blocker. Preserve the fixture and lo
 
 Use only disposable volumes. Record each mount point with the client tools, its target volume, read-write/read-only status, server, and FID before testing.
 
-1. Navigate and list a child-volume mount point inside the test root.
+1. Navigate and list a child-volume mount point inside the test root. This logical AFS volume boundary is distinct from a POSIX symlink or kernel mount; the provider must identify it from reviewed AFS metadata and record the crossing.
 2. Compare ACL display and effective caller access on the parent, mount point, child-volume root, and descendants.
-3. Copy files and trees into and out of the child volume and compare hashes, ACL effects, and mount-point preservation.
+3. Start single-file copy/read/write operations from inside the child volume and copy files into and out of it, then compare hashes, ACL effects, provider identity evidence, and mount-point preservation.
 4. Attempt rename/move across the volume boundary. Require either a clear non-destructive failure or an explicitly implemented copy-and-delete fallback with complete verification.
-5. Attempt recursive copy, delete, and archive creation at the mount-point object. Confirm whether the operation treats it as a boundary or traverses it; traversal is permitted only when explicitly intended and the entire target volume is disposable.
+5. Attempt parent-started search, recursive copy, and recursive delete across the mount-point object. Require a fail-closed boundary result with no child-volume delta. Archive creation is guarded-disabled and must be rejected before any archive walker runs. Renaming or deleting the mount-point object itself must also be rejected unless a separately reviewed AFS mount-management feature is explicitly in scope.
 6. Exercise a read-only mount/volume. Writes must fail clearly and leave no partial files or stale upload chunks.
-7. Test a symlink to a child-volume path and a symlink to an AFS path outside the configured root.
-8. Remove or make the mount temporarily unavailable and confirm fail-closed behavior without PHP warnings, hangs, or fallback to a local `/afs` directory.
+7. Test a POSIX symlink to a child-volume path and a symlink to an AFS path outside the configured root; both follow attempts must be rejected under the symlink policy above.
+8. Add a nested kernel mount under the configured root and prove that it is never traversed, even if its device number or apparent path resembles the AFS tree.
+9. Remove or make the AFS mount temporarily unavailable and confirm fail-closed behavior without PHP warnings, hangs, or fallback to a local `/afs` directory.
 
 Never use a production volume merely to test a read-only case. A supposedly read-only path can still expose sensitive data through view, download, direct-link, copy, or archive operations.
 
@@ -195,11 +251,16 @@ Rollback must be prepared before the first mutation and executed even after a fa
 An AFS/AuriStor compatibility claim requires all of the following:
 
 - no PHP lint, static-test, upstream-check, warning, or parser failures;
+- a separately reviewed descriptor-backed provider or equivalent native broker, with every active metadata, ACL, and I/O call site bound to it and no production use of the bundled pathname preview;
 - proven web-worker identity and token/PAG isolation for each authorization role;
 - exact normal and negative ACL round trips for standard `lrwidka` and AuriStor `A-H`, preserved inherited ACLs, fail-closed MaxACL behavior, correct `k` handling, CSRF rejection, and enforcement evidence;
-- every claimed I/O route tested in both allowed and denied cases with no unexplained partial state;
+- all 19 transitional classifications tested in both allowed and denied cases, with provider/broker evidence, no generic-I/O fallback, and no unexplained partial state;
+- all four guarded-disabled classifications proven through absent/disabled controls and crafted-request rejection before generic code runs;
 - no outside-root read or mutation through symlinks, archives, mount points, direct links, or cross-volume operations;
 - documented, acceptable behavior for file ACL requests, read-only volumes, token expiry, unavailable mounts, and cross-volume moves;
+- verified AFS-mode rejection of configuration self-write and online viewing, absence of raw media/hover and managed-root direct URLs, and web-server denial of guessed managed paths;
+- the exact application-owned 13-directive CSP, refactored nonce/hash-compatible templates, one response header, and complete canonical-manifest/transitive asset evidence with a clean browser trace;
+- one exact combined application/container image that supplies and checksum-locks `afs_contract.php`, `afs.php`, the provider, application, schema/manifest/assets, AFS client and mount inventory, external-auth bootstrap, worker identity/PAG/token, canonical origin/Host policy, trusted-proxy policy, egress policy, and static-file denial;
 - complete evidence and a verified rollback/teardown.
 
-If a generic endpoint remains intentionally unwired, report it as unsupported rather than converting its static expected failure into a compatibility pass.
+If a transitional endpoint lacks the reviewed descriptor boundary or exact-image live evidence, report it as transitional/unsupported rather than a compatibility pass. If an operation remains deliberately disabled, preserve and report that rejection instead of implying feature support.
