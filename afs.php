@@ -1221,7 +1221,8 @@ class AfsProductionReadiness
             'profile', 'afs_enabled', 'external_auth', 'request_identity',
             'local_auth', 'local_users_empty', 'settings_enabled',
             'embed_enabled', 'direct_links_enabled',
-            'raw_previews_enabled', 'root_url', 'self_url',
+            'raw_previews_enabled', 'url_upload_enabled',
+            'root_url', 'self_url',
             'data_root', 'asset_manifest_sha256',
             'expected_factory_class', 'expected_factory_id',
             'expected_provider_class', 'expected_provider_id'
@@ -1243,6 +1244,7 @@ class AfsProductionReadiness
             'embed_enabled' => false,
             'direct_links_enabled' => false,
             'raw_previews_enabled' => false,
+            'url_upload_enabled' => false,
             'root_url' => ''
         );
         foreach ( $fixed as $key => $expected ) {

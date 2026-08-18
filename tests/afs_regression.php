@@ -632,4 +632,38 @@ try {
     remove_test_tree($tempRoot);
 }
 
+$urlUploadDisabledProfile = array(
+    'profile' => 'afs-descriptor-v1',
+    'afs_enabled' => true,
+    'external_auth' => true,
+    'request_identity' => 'alice@example.test',
+    'local_auth' => false,
+    'local_users_empty' => true,
+    'settings_enabled' => false,
+    'embed_enabled' => false,
+    'direct_links_enabled' => false,
+    'raw_previews_enabled' => false,
+    'url_upload_enabled' => false,
+    'root_url' => '',
+    'self_url' => '/tinyfilemanager.php',
+    'data_root' => '/afs/example.test/users/alice',
+    'asset_manifest_sha256' => str_repeat('a', 64),
+    'expected_factory_class' => 'TrustedAfsFactory',
+    'expected_factory_id' => 'trusted-factory-v1',
+    'expected_provider_class' => 'TrustedAfsProvider',
+    'expected_provider_id' => 'trusted-provider-v1'
+);
+$profileError = null;
+check(AfsProductionReadiness::validateProductionProfile(
+        $urlUploadDisabledProfile, $profileError) === true,
+    'production profile accepts URL upload only when literally false');
+$urlUploadEnabledProfile = $urlUploadDisabledProfile;
+$urlUploadEnabledProfile['url_upload_enabled'] = true;
+$profileError = null;
+check(AfsProductionReadiness::validateProductionProfile(
+        $urlUploadEnabledProfile, $profileError) === false
+    && is_string($profileError)
+    && strpos($profileError, 'url_upload_enabled') !== false,
+    'production profile rejects enabled URL upload');
+
 echo "1..$tests\n";

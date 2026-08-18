@@ -74,6 +74,7 @@ $contractPos = strpos(
     "require_once __DIR__ . '/afs_contract.php';"
 );
 $configPos = strpos($manager, '@include($config_file);');
+$urlUploadDefaultPos = strpos($manager, '$url_upload_enabled = true;');
 $guardPos = strpos(
     $manager,
     "if (\$afsSupport || defined('AFS_PRODUCTION_PROFILE')) {"
@@ -83,6 +84,11 @@ $requirePos = strpos($manager, "require_once __DIR__ . '/afs.php';");
 afs_test_ok($defaultPos !== false, 'AFS support defaults to disabled');
 afs_test_ok($contractPos !== false, 'side-effect-free AFS contract is loaded');
 afs_test_ok($configPos !== false, 'external config.php is included');
+afs_test_ok(
+    $urlUploadDefaultPos !== false && $configPos !== false
+        && $urlUploadDefaultPos < $configPos,
+    'URL upload defaults enabled for non-AFS before config.php overrides it'
+);
 afs_test_ok(
     $guardPos !== false,
     'AFS helper load is conditional on opt-in or the immutable profile'
@@ -355,6 +361,8 @@ $actualProfileFields = array(
         'profile state records actual direct-link enablement',
     "'raw_previews_enabled' => \$raw_previews_enabled" =>
         'profile state records actual raw-preview enablement',
+    "'url_upload_enabled' => \$url_upload_enabled" =>
+        'profile state records actual URL-upload enablement',
     "'root_url' => \$root_url" =>
         'profile state records the actual managed-root URL',
     "'self_url' => \$afsSelfUrl" =>
@@ -419,6 +427,7 @@ $fixedProfileValues = array(
     "'embed_enabled' => false",
     "'direct_links_enabled' => false",
     "'raw_previews_enabled' => false",
+    "'url_upload_enabled' => false",
     "'root_url' => ''"
 );
 foreach ($fixedProfileValues as $fixedProfileValue) {
@@ -491,7 +500,8 @@ afs_test_contains(
 $profileKeys = array(
     'profile', 'afs_enabled', 'external_auth', 'request_identity',
     'local_auth', 'local_users_empty', 'settings_enabled', 'embed_enabled',
-    'direct_links_enabled', 'raw_previews_enabled', 'root_url', 'self_url',
+    'direct_links_enabled', 'raw_previews_enabled', 'url_upload_enabled',
+    'root_url', 'self_url',
     'data_root', 'asset_manifest_sha256',
     'expected_factory_class', 'expected_factory_id',
     'expected_provider_class', 'expected_provider_id'
@@ -597,7 +607,7 @@ $featureConstants = afs_test_section(
 );
 $featureConstantNames = array(
     'FM_SETTINGS_ENABLED', 'FM_DIRECT_LINKS_ENABLED',
-    'FM_RAW_PREVIEWS_ENABLED'
+    'FM_RAW_PREVIEWS_ENABLED', 'FM_URL_UPLOAD_ENABLED'
 );
 foreach ($featureConstantNames as $featureConstantName) {
     afs_test_contains(
@@ -625,6 +635,11 @@ afs_test_contains(
     $featureConstants,
     "defined('FM_RAW_PREVIEWS_ENABLED') || define('FM_RAW_PREVIEWS_ENABLED', \$raw_previews_enabled);",
     'final raw-preview constant derives from validated actual state'
+);
+afs_test_contains(
+    $featureConstants,
+    "defined('FM_URL_UPLOAD_ENABLED') || define('FM_URL_UPLOAD_ENABLED', \$url_upload_enabled);",
+    'final URL-upload constant derives from validated actual state'
 );
 afs_test_contains(
     $featureConstants,
@@ -1393,8 +1408,59 @@ afs_test_ok(
     'active Tiny File Manager routes never bypass the configured provider with new Afs'
 );
 
-// Preserve the current URL-upload boundary checks and the fork's proxy path.
+// AFS production rejects URL-upload egress before URL parsing, temporary-file
+// creation, or network I/O. Non-AFS mode retains the upstream validation and
+// the fork's proxy path behind that early feature gate.
 $urlUpload = afs_test_section($manager, '//upload using url', "    exit();\n}", 'URL-upload route');
+afs_test_contains(
+    $urlUpload,
+    '$urlUploadRequested = isset($_POST[\'type\'])',
+    'URL-upload request detection starts from the POST action'
+);
+afs_test_contains(
+    $urlUpload,
+    "\$_POST['type'] === 'upload'",
+    'URL-upload request detection requires the upload action'
+);
+afs_test_contains(
+    $urlUpload,
+    "array_key_exists('uploadurl', \$_REQUEST)",
+    'URL-upload request detection requires the URL field'
+);
+afs_test_contains(
+    $urlUpload,
+    'if ($urlUploadRequested && FM_URL_UPLOAD_ENABLED !== true)',
+    'disabled URL upload is rejected for every detected request'
+);
+afs_test_contains(
+    $urlUpload,
+    "header('HTTP/1.1 403 Forbidden');",
+    'disabled URL upload returns HTTP 403'
+);
+afs_test_contains(
+    $urlUpload,
+    "'message' => 'URL upload is disabled'",
+    'disabled URL upload returns an explicit failure response'
+);
+$urlUploadGatePos = strpos(
+    $urlUpload,
+    'if ($urlUploadRequested && FM_URL_UPLOAD_ENABLED !== true)'
+);
+$urlUploadDenyExitPos = $urlUploadGatePos === false ? false
+    : strpos($urlUpload, 'exit();', $urlUploadGatePos);
+$urlUploadParsePos = strpos($urlUpload, 'parse_url($url, PHP_URL_HOST)');
+$urlUploadTempPos = strpos($urlUpload, 'tempnam(sys_get_temp_dir(), "upload-")');
+$urlUploadCopyPos = strpos($urlUpload, 'copy($url, $temp_file, $ctx)');
+afs_test_ok(
+    $urlUploadGatePos !== false && $urlUploadDenyExitPos !== false
+        && $urlUploadParsePos !== false && $urlUploadTempPos !== false
+        && $urlUploadCopyPos !== false
+        && $urlUploadGatePos < $urlUploadDenyExitPos
+        && $urlUploadDenyExitPos < $urlUploadParsePos
+        && $urlUploadDenyExitPos < $urlUploadTempPos
+        && $urlUploadDenyExitPos < $urlUploadCopyPos,
+    'URL-upload denial exits before parse_url, tempnam, and network copy'
+);
 afs_test_contains($urlUpload, 'preg_match("|^http(s)?://.+$|"', 'URL upload accepts only HTTP(S)-shaped URLs');
 afs_test_contains($urlUpload, 'parse_url($url, PHP_URL_HOST)', 'URL upload parses the destination host');
 afs_test_contains($urlUpload, 'parse_url($url, PHP_URL_PORT)', 'URL upload parses the destination port');
@@ -1406,6 +1472,58 @@ afs_test_contains($urlUpload, 'basename($fileinfo->name)', 'URL-upload destinati
 afs_test_contains($urlUpload, "strtok(get_file_path(), '?')", 'URL-upload destination strips a query suffix');
 afs_test_contains($urlUpload, "'proxy' => 'tcp://' . \$proxyServer", 'non-cURL URL upload preserves configured proxy support');
 afs_test_contains($urlUpload, "'request_fulluri' => true", 'proxy requests retain absolute request URIs');
+
+$uploadPage = afs_test_section(
+    $manager,
+    '// upload form',
+    '// file viewer',
+    'upload page and client script'
+);
+$urlUploadUiGuard = '<?php if (FM_URL_UPLOAD_ENABLED === true): ?>';
+$urlUploadTabPos = strpos($uploadPage, 'href="#urlUploader"');
+$urlUploadTabGuardPos = strpos($uploadPage, $urlUploadUiGuard);
+$urlUploadTabEndPos = $urlUploadTabPos === false ? false
+    : strpos($uploadPage, '<?php endif; ?>', $urlUploadTabPos);
+$urlUploadFormGuardPos = $urlUploadTabEndPos === false ? false
+    : strpos($uploadPage, $urlUploadUiGuard, $urlUploadTabEndPos);
+$urlUploadFormPos = strpos($uploadPage, 'id="js-form-url-upload"');
+$urlUploadFormEndPos = $urlUploadFormPos === false ? false
+    : strpos($uploadPage, '<?php endif; ?>', $urlUploadFormPos);
+afs_test_ok(
+    substr_count($uploadPage, $urlUploadUiGuard) === 2
+        && $urlUploadTabGuardPos !== false && $urlUploadTabPos !== false
+        && $urlUploadTabEndPos !== false
+        && $urlUploadTabGuardPos < $urlUploadTabPos
+        && $urlUploadTabPos < $urlUploadTabEndPos
+        && $urlUploadFormGuardPos !== false && $urlUploadFormPos !== false
+        && $urlUploadFormEndPos !== false
+        && $urlUploadFormGuardPos < $urlUploadFormPos
+        && $urlUploadFormPos < $urlUploadFormEndPos,
+    'URL-upload tab and form are both omitted unless explicitly enabled'
+);
+
+$urlUploadClient = afs_test_section(
+    $manager,
+    "            <?php if (FM_URL_UPLOAD_ENABLED === true): ?>\n"
+        . '            // Upload files using URL @param {Object}',
+    '            // Search template',
+    'footer URL-upload client script'
+);
+$urlUploadScriptGuardPos = strpos($urlUploadClient, $urlUploadUiGuard);
+$urlUploadScriptPos = strpos(
+    $urlUploadClient,
+    'function upload_from_url($this)'
+);
+$urlUploadScriptEndPos = $urlUploadScriptPos === false ? false
+    : strpos($urlUploadClient, '<?php endif; ?>', $urlUploadScriptPos);
+afs_test_ok(
+    substr_count($urlUploadClient, $urlUploadUiGuard) === 1
+        && $urlUploadScriptGuardPos !== false && $urlUploadScriptPos !== false
+        && $urlUploadScriptEndPos !== false
+        && $urlUploadScriptGuardPos < $urlUploadScriptPos
+        && $urlUploadScriptPos < $urlUploadScriptEndPos,
+    'URL-upload JavaScript is omitted unless explicitly enabled'
+);
 
 // Preserve exclusion behavior added upstream: configured exact names, wildcard
 // extensions, and full paths all remain excluded from listing/view/edit.

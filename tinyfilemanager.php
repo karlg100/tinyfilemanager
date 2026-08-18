@@ -176,10 +176,11 @@ $afsSupport = false;
 $afs_external_auth = false;
 
 // Feature switches retain upstream behavior by default. The immutable AFS
-// production profile requires all four to be disabled.
+// production profile requires all five to be disabled.
 $settings_enabled = true;
 $direct_links_enabled = true;
 $raw_previews_enabled = true;
+$url_upload_enabled = true;
 
 // AFS production mode requires a native descriptor-backed provider.  The
 // bundled PHP AfsDataPlane is an offline/path-policy preview and deliberately
@@ -248,6 +249,7 @@ if ($afsSupport || defined('AFS_PRODUCTION_PROFILE')) {
         'embed_enabled' => defined('FM_EMBED'),
         'direct_links_enabled' => $direct_links_enabled,
         'raw_previews_enabled' => $raw_previews_enabled,
+        'url_upload_enabled' => $url_upload_enabled,
         'root_url' => $root_url,
         'self_url' => $afsSelfUrl,
         'data_root' => $afsDataRoot,
@@ -662,16 +664,20 @@ if ($afsSupport && ((defined('FM_SETTINGS_ENABLED')
     || (defined('FM_DIRECT_LINKS_ENABLED')
         && FM_DIRECT_LINKS_ENABLED !== false)
     || (defined('FM_RAW_PREVIEWS_ENABLED')
-        && FM_RAW_PREVIEWS_ENABLED !== false))) {
+        && FM_RAW_PREVIEWS_ENABLED !== false)
+    || (defined('FM_URL_UPLOAD_ENABLED')
+        && FM_URL_UPLOAD_ENABLED !== false))) {
     fm_afs_readiness_error(
         'AFS production feature constants must remain disabled.');
 }
 defined('FM_SETTINGS_ENABLED') || define('FM_SETTINGS_ENABLED', $settings_enabled);
 defined('FM_DIRECT_LINKS_ENABLED') || define('FM_DIRECT_LINKS_ENABLED', $direct_links_enabled);
 defined('FM_RAW_PREVIEWS_ENABLED') || define('FM_RAW_PREVIEWS_ENABLED', $raw_previews_enabled);
+defined('FM_URL_UPLOAD_ENABLED') || define('FM_URL_UPLOAD_ENABLED', $url_upload_enabled);
 if ($afsSupport && (FM_SETTINGS_ENABLED !== false
     || FM_DIRECT_LINKS_ENABLED !== false
-    || FM_RAW_PREVIEWS_ENABLED !== false)) {
+    || FM_RAW_PREVIEWS_ENABLED !== false
+    || FM_URL_UPLOAD_ENABLED !== false)) {
     fm_afs_readiness_error(
         'AFS production features did not remain fail-closed.');
 }
@@ -878,7 +884,16 @@ if ((isset($_SESSION[FM_SESSION_ID]['logged'], $auth_users[$_SESSION[FM_SESSION_
     }
 
     //upload using url
-    if (isset($_POST['type']) && $_POST['type'] == "upload" && !empty($_REQUEST["uploadurl"])) {
+    $urlUploadRequested = isset($_POST['type'])
+        && $_POST['type'] === 'upload'
+        && array_key_exists('uploadurl', $_REQUEST);
+    if ($urlUploadRequested && FM_URL_UPLOAD_ENABLED !== true) {
+        header('HTTP/1.1 403 Forbidden');
+        echo json_encode(array('fail' => array(
+            'message' => 'URL upload is disabled')));
+        exit();
+    }
+    if ($urlUploadRequested && !empty($_REQUEST['uploadurl'])) {
         $path = FM_ROOT_PATH;
         if (FM_PATH != '') {
             $path .= '/' . FM_PATH;
@@ -1825,9 +1840,11 @@ if (isset($_GET['upload']) && !FM_READONLY) {
                     <li class="nav-item">
                         <a class="nav-link active" href="#fileUploader" data-target="#fileUploader"><i class="fa fa-arrow-circle-o-up"></i> <?php echo lng('UploadingFiles') ?></a>
                     </li>
+                    <?php if (FM_URL_UPLOAD_ENABLED === true): ?>
                     <li class="nav-item">
                         <a class="nav-link" href="#urlUploader" class="js-url-upload" data-target="#urlUploader"><i class="fa fa-link"></i> <?php echo lng('Upload from URL') ?></a>
                     </li>
+                    <?php endif; ?>
                 </ul>
             </div>
             <div class="card-body">
@@ -1845,6 +1862,7 @@ if (isset($_GET['upload']) && !FM_READONLY) {
                     </div>
                 </form>
 
+                <?php if (FM_URL_UPLOAD_ENABLED === true): ?>
                 <div class="upload-url-wrapper card-tabs-container hidden" id="urlUploader">
                     <form id="js-form-url-upload" class="row row-cols-lg-auto g-3 align-items-center" onsubmit="return upload_from_url(this);" method="POST" action="">
                         <input type="hidden" name="type" value="upload" aria-label="hidden" aria-hidden="true">
@@ -1859,6 +1877,7 @@ if (isset($_GET['upload']) && !FM_READONLY) {
                     </form>
                     <div id="js-url-upload__list" class="col-9 mt-3"></div>
                 </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -6007,6 +6026,7 @@ function fm_show_header_login()
                 return false;
             }
 
+            <?php if (FM_URL_UPLOAD_ENABLED === true): ?>
             // Upload files using URL @param {Object}
             function upload_from_url($this) {
                 let form = $($this),
@@ -6043,6 +6063,7 @@ function fm_show_header_login()
                 });
                 return false;
             }
+            <?php endif; ?>
 
             // Search template
             function search_template(data) {

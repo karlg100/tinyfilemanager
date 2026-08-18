@@ -121,6 +121,7 @@ function readiness_without_csp_directive($policy, $directive)
 echo "AFS readiness contract\n";
 
 $configPos = strpos($manager, '@include($config_file);');
+$urlUploadDefaultPos = strpos($manager, '$url_upload_enabled = true;');
 $contractReadablePos = strpos(
     $manager,
     "if (is_readable(__DIR__ . '/afs_contract.php'))"
@@ -173,6 +174,11 @@ $readinessBlock = readiness_section(
 );
 
 readiness_ok($configPos !== false, 'config.php inclusion is present');
+readiness_ok(
+    $urlUploadDefaultPos !== false && $configPos !== false
+        && $urlUploadDefaultPos < $configPos,
+    'non-AFS URL upload defaults to literal true before config.php overrides'
+);
 readiness_ok(
     $contractReadablePos !== false && $contractRequirePos !== false
         && $configPos !== false
@@ -342,6 +348,15 @@ $finalFeatureGate = strpos(
     $finalFeatureBlock,
     'if ($afsSupport && (FM_SETTINGS_ENABLED !== false'
 );
+$urlUploadPredefinedGate = strpos(
+    $finalFeatureBlock,
+    "defined('FM_URL_UPLOAD_ENABLED')"
+);
+$urlUploadDefinition = strpos(
+    $finalFeatureBlock,
+    "defined('FM_URL_UPLOAD_ENABLED') || define('FM_URL_UPLOAD_ENABLED', "
+        . '$url_upload_enabled);'
+);
 readiness_ok(
     $predefinedFeatureGate !== false && $featureDefinitions !== false
         && $predefinedFeatureGate < $featureDefinitions,
@@ -361,6 +376,26 @@ readiness_ok(
             $finalFeatureGate
         ) !== false,
     'final settings/direct-link/raw-preview constants remain fail-closed'
+);
+readiness_ok(
+    $urlUploadPredefinedGate !== false && $urlUploadDefinition !== false
+        && $urlUploadPredefinedGate < $urlUploadDefinition
+        && strpos(
+            $finalFeatureBlock,
+            'FM_URL_UPLOAD_ENABLED !== false',
+            $urlUploadPredefinedGate
+        ) !== false,
+    'AFS rejects a pre-defined URL-upload constant unless it is literal false'
+);
+readiness_ok(
+    $urlUploadDefinition !== false && $finalFeatureGate !== false
+        && $urlUploadDefinition < $finalFeatureGate
+        && strpos(
+            $finalFeatureBlock,
+            'FM_URL_UPLOAD_ENABLED !== false',
+            $finalFeatureGate
+        ) !== false,
+    'AFS rechecks the final URL-upload constant for literal false'
 );
 
 $settingsRoute = readiness_section(
@@ -401,6 +436,99 @@ readiness_ok(
     $passwordHashGuard !== false && $passwordHashWork !== false
         && $passwordHashGuard < $passwordHashWork,
     'disabled settings gate rejects password-hash utility before work'
+);
+
+$urlUploadRoute = readiness_section(
+    $manager,
+    '//upload using url',
+    '// Delete file / folder',
+    'URL-upload handler'
+);
+$urlUploadRequestedPos = strpos(
+    $urlUploadRoute,
+    '$urlUploadRequested = isset('
+);
+$urlUploadDisabledPos = strpos(
+    $urlUploadRoute,
+    'if ($urlUploadRequested && FM_URL_UPLOAD_ENABLED !== true)'
+);
+$urlUploadActivePos = strpos(
+    $urlUploadRoute,
+    "if (\$urlUploadRequested && !empty(\$_REQUEST['uploadurl']))"
+);
+$urlUploadParsePos = strpos($urlUploadRoute, '$url = !empty(');
+$urlUploadTempPos = strpos($urlUploadRoute, 'tempnam(');
+$urlUploadCurlPos = strpos($urlUploadRoute, 'curl_init(');
+$urlUploadStreamPos = strpos($urlUploadRoute, 'copy($url, $temp_file, $ctx)');
+readiness_ok(
+    $urlUploadRequestedPos !== false && $urlUploadDisabledPos !== false
+        && $urlUploadActivePos !== false && $urlUploadParsePos !== false
+        && $urlUploadTempPos !== false && $urlUploadCurlPos !== false
+        && $urlUploadStreamPos !== false
+        && $urlUploadRequestedPos < $urlUploadDisabledPos
+        && $urlUploadDisabledPos < $urlUploadActivePos
+        && $urlUploadDisabledPos < $urlUploadParsePos
+        && $urlUploadDisabledPos < $urlUploadTempPos
+        && $urlUploadDisabledPos < $urlUploadCurlPos
+        && $urlUploadDisabledPos < $urlUploadStreamPos
+        && strpos(
+            $urlUploadRoute,
+            "header('HTTP/1.1 403 Forbidden');",
+            $urlUploadDisabledPos
+        ) !== false,
+    'disabled URL upload rejects before parsing, temporary files, or network I/O'
+);
+
+$uploadForm = readiness_section(
+    $manager,
+    '// upload form',
+    '// file viewer',
+    'upload-form UI'
+);
+$urlUiGuard = '<?php if (FM_URL_UPLOAD_ENABLED === true): ?>';
+$urlTabGuardPos = strpos($uploadForm, $urlUiGuard);
+$urlTabPos = strpos($uploadForm, 'href="#urlUploader"');
+$urlTabEndPos = $urlTabPos === false ? false
+    : strpos($uploadForm, '<?php endif; ?>', $urlTabPos);
+$urlFormGuardPos = $urlTabEndPos === false ? false
+    : strpos($uploadForm, $urlUiGuard, $urlTabEndPos + 1);
+$localUploadFormPos = strpos($uploadForm, 'id="fileUploader"');
+$urlFormPos = strpos($uploadForm, 'id="js-form-url-upload"');
+$urlFormEndPos = $urlFormPos === false ? false
+    : strpos($uploadForm, '<?php endif; ?>', $urlFormPos);
+readiness_ok(
+    $urlTabGuardPos !== false && $urlTabPos !== false
+        && $urlTabEndPos !== false && $urlFormGuardPos !== false
+        && $localUploadFormPos !== false && $urlFormPos !== false
+        && $urlFormEndPos !== false
+        && $urlTabGuardPos < $urlTabPos && $urlTabPos < $urlTabEndPos
+        && $urlTabEndPos < $localUploadFormPos
+        && $localUploadFormPos < $urlFormGuardPos
+        && $urlFormGuardPos < $urlFormPos && $urlFormPos < $urlFormEndPos,
+    'URL-upload tab and form are conditional while local upload remains available'
+);
+
+$urlScriptCommentPos = strpos(
+    $manager,
+    '// Upload files using URL @param {Object}'
+);
+$urlScriptGuardPos = $urlScriptCommentPos === false ? false
+    : strrpos(substr($manager, 0, $urlScriptCommentPos), $urlUiGuard);
+$urlScriptFunctionPos = strpos($manager, 'function upload_from_url(',
+    $urlScriptCommentPos === false ? 0 : $urlScriptCommentPos);
+$urlScriptEndPos = $urlScriptFunctionPos === false ? false
+    : strpos($manager, '<?php endif; ?>', $urlScriptFunctionPos);
+$searchScriptPos = strpos($manager, '// Search template',
+    $urlScriptFunctionPos === false ? 0 : $urlScriptFunctionPos);
+readiness_ok(
+    $urlScriptGuardPos !== false && $urlScriptCommentPos !== false
+        && $urlScriptFunctionPos !== false && $urlScriptEndPos !== false
+        && $searchScriptPos !== false
+        && $urlScriptGuardPos < $urlScriptCommentPos
+        && $urlScriptCommentPos < $urlScriptFunctionPos
+        && $urlScriptFunctionPos < $urlScriptEndPos
+        && $urlScriptEndPos < $searchScriptPos,
+    'URL-upload JavaScript is emitted only when the feature is literally true'
 );
 
 $configSave = readiness_section(
@@ -583,7 +711,8 @@ foreach ($remoteOrWildcardPolicies as $label => $policy) {
 $productionProfileKeys = array(
     'profile', 'afs_enabled', 'external_auth', 'request_identity',
     'local_auth', 'local_users_empty', 'settings_enabled', 'embed_enabled',
-    'direct_links_enabled', 'raw_previews_enabled', 'root_url', 'self_url',
+    'direct_links_enabled', 'raw_previews_enabled', 'url_upload_enabled',
+    'root_url', 'self_url',
     'data_root', 'asset_manifest_sha256',
     'expected_factory_class', 'expected_factory_id',
     'expected_provider_class', 'expected_provider_id'
@@ -615,6 +744,10 @@ readiness_ok(
     'immutable AFS production-profile validator is available'
 );
 readiness_ok(
+    strpos($afsSource, "'url_upload_enabled' => false") !== false,
+    'immutable AFS profile requires URL upload to be literal false'
+);
+readiness_ok(
     defined('AfsProductionReadiness::PRODUCTION_PROFILE')
         && AfsProductionReadiness::PRODUCTION_PROFILE === 'afs-descriptor-v1'
         && substr_count(
@@ -643,6 +776,7 @@ $profileStateMappings = array(
     'embed_enabled' => "'embed_enabled' => defined('FM_EMBED')",
     'direct_links_enabled' => "'direct_links_enabled' => \$direct_links_enabled",
     'raw_previews_enabled' => "'raw_previews_enabled' => \$raw_previews_enabled",
+    'url_upload_enabled' => "'url_upload_enabled' => \$url_upload_enabled",
     'root_url' => "'root_url' => \$root_url",
     'self_url' => "'self_url' => \$afsSelfUrl",
     'data_root' => "'data_root' => \$afsDataRoot",
@@ -789,6 +923,7 @@ if ($profileValidatorAvailable) {
         'embed_enabled' => false,
         'direct_links_enabled' => false,
         'raw_previews_enabled' => false,
+        'url_upload_enabled' => false,
         'root_url' => '',
         'self_url' => '/tinyfilemanager.php',
         'data_root' => '/afs/example.test/users/alice',
@@ -863,6 +998,10 @@ if ($profileValidatorAvailable) {
         'embed enabled' => array('embed_enabled', true),
         'direct links enabled' => array('direct_links_enabled', true),
         'raw previews enabled' => array('raw_previews_enabled', true),
+        'URL upload enabled' => array('url_upload_enabled', true),
+        'non-boolean URL upload setting' => array(
+            'url_upload_enabled', 'false'
+        ),
         'raw root URL' => array('root_url', '/afs'),
         'bare AFS data root' => array('data_root', '/afs'),
         'empty AFS data root suffix' => array('data_root', '/afs/'),

@@ -167,6 +167,15 @@ $navigationRoute = audit_section(
     $manager,
     "/*************************** ACTIONS ***************************/\n\n// get current path",
     '// upload form', 'navigation/list route');
+$uploadPage = audit_section(
+    $manager, '// upload form', '// file viewer',
+    'upload page and client script');
+$urlUploadClient = audit_section(
+    $manager,
+    "            <?php if (FM_URL_UPLOAD_ENABLED === true): ?>\n"
+        . '            // Upload files using URL @param {Object}',
+    '            // Search template',
+    'footer URL-upload client script');
 $viewerRoute = audit_section(
     $manager, '// file viewer', '// file editor', 'file-view route');
 $editorRoute = audit_section(
@@ -333,6 +342,106 @@ $productionProfileValidator = audit_section(
     'public static function applicationTemplatesSupportStrictCsp(',
     'production profile validator');
 
+// URL upload remains available by default to non-AFS deployments, but the
+// immutable AFS profile and its final constant disable the entire egress path.
+$urlUploadDefaultPos = strpos($manager, '$url_upload_enabled = true;');
+$configIncludePos = strpos($manager, '@include($config_file);');
+$urlUploadProfileGate = $urlUploadDefaultPos !== false
+    && $configIncludePos !== false
+    && $urlUploadDefaultPos < $configIncludePos
+    && strpos(
+        $productionProfileValidator,
+        "'url_upload_enabled' => false") !== false
+    && audit_ordered($featureConstants, array(
+        "defined('FM_URL_UPLOAD_ENABLED')",
+        'FM_URL_UPLOAD_ENABLED !== false',
+        "define('FM_URL_UPLOAD_ENABLED', \$url_upload_enabled)",
+        'FM_URL_UPLOAD_ENABLED !== false'));
+
+$urlUploadGatePos = strpos(
+    $urlUploadRoute,
+    'if ($urlUploadRequested && FM_URL_UPLOAD_ENABLED !== true)'
+);
+$urlUploadDenyExitPos = $urlUploadGatePos === false ? false
+    : strpos($urlUploadRoute, 'exit();', $urlUploadGatePos);
+$urlUploadParsePos = strpos(
+    $urlUploadRoute, 'parse_url($url, PHP_URL_HOST)');
+$urlUploadTempPos = strpos(
+    $urlUploadRoute, 'tempnam(sys_get_temp_dir(), "upload-")');
+$urlUploadCopyPos = strpos(
+    $urlUploadRoute, 'copy($url, $temp_file, $ctx)');
+$urlUploadHandlerGate = strpos(
+        $urlUploadRoute,
+        '$urlUploadRequested = isset($_POST[\'type\'])') !== false
+    && strpos($urlUploadRoute, "\$_POST['type'] === 'upload'") !== false
+    && strpos(
+        $urlUploadRoute,
+        "array_key_exists('uploadurl', \$_REQUEST)") !== false
+    && $urlUploadGatePos !== false
+    && strpos($urlUploadRoute, "header('HTTP/1.1 403 Forbidden');") !== false
+    && strpos(
+        $urlUploadRoute,
+        "'message' => 'URL upload is disabled'") !== false
+    && $urlUploadDenyExitPos !== false
+    && $urlUploadParsePos !== false
+    && $urlUploadTempPos !== false
+    && $urlUploadCopyPos !== false
+    && $urlUploadGatePos < $urlUploadDenyExitPos
+    && $urlUploadDenyExitPos < $urlUploadParsePos
+    && $urlUploadDenyExitPos < $urlUploadTempPos
+    && $urlUploadDenyExitPos < $urlUploadCopyPos;
+
+$urlUploadUiGuard = '<?php if (FM_URL_UPLOAD_ENABLED === true): ?>';
+$urlUploadTabGuardPos = strpos($uploadPage, $urlUploadUiGuard);
+$urlUploadTabPos = strpos($uploadPage, 'href="#urlUploader"');
+$urlUploadTabEndPos = $urlUploadTabPos === false ? false
+    : strpos($uploadPage, '<?php endif; ?>', $urlUploadTabPos);
+$urlUploadFormGuardPos = $urlUploadTabEndPos === false ? false
+    : strpos($uploadPage, $urlUploadUiGuard, $urlUploadTabEndPos);
+$urlUploadFormPos = strpos($uploadPage, 'id="js-form-url-upload"');
+$urlUploadFormEndPos = $urlUploadFormPos === false ? false
+    : strpos($uploadPage, '<?php endif; ?>', $urlUploadFormPos);
+$urlUploadUiGate = substr_count($uploadPage, $urlUploadUiGuard) === 2
+    && $urlUploadTabGuardPos !== false && $urlUploadTabPos !== false
+    && $urlUploadTabEndPos !== false
+    && $urlUploadTabGuardPos < $urlUploadTabPos
+    && $urlUploadTabPos < $urlUploadTabEndPos
+    && $urlUploadFormGuardPos !== false && $urlUploadFormPos !== false
+    && $urlUploadFormEndPos !== false
+    && $urlUploadFormGuardPos < $urlUploadFormPos
+    && $urlUploadFormPos < $urlUploadFormEndPos;
+
+$urlUploadScriptGuardPos = strpos($urlUploadClient, $urlUploadUiGuard);
+$urlUploadScriptPos = strpos(
+    $urlUploadClient,
+    'function upload_from_url($this)'
+);
+$urlUploadScriptEndPos = $urlUploadScriptPos === false ? false
+    : strpos($urlUploadClient, '<?php endif; ?>', $urlUploadScriptPos);
+$urlUploadScriptGate = substr_count(
+        $urlUploadClient, $urlUploadUiGuard) === 1
+    && $urlUploadScriptGuardPos !== false
+    && $urlUploadScriptPos !== false && $urlUploadScriptEndPos !== false
+    && $urlUploadScriptGuardPos < $urlUploadScriptPos
+    && $urlUploadScriptPos < $urlUploadScriptEndPos;
+
+audit_assert(
+    $urlUploadProfileGate,
+    'AFS URL-upload profile/default/final-constant gate changed'
+);
+audit_assert(
+    $urlUploadHandlerGate,
+    'AFS URL-upload denial no longer precedes parse/temp/network I/O'
+);
+audit_assert(
+    $urlUploadUiGate,
+    'disabled URL-upload tab or form can be emitted'
+);
+audit_assert(
+    $urlUploadScriptGate,
+    'disabled URL-upload JavaScript can be emitted'
+);
+
 // A single raw-URL invariant is conjoined with every route classification.
 // FM_ROOT_URL may remain in explicit non-AFS branches, but an AFS link/view
 // must stay on FM_SELF_URL/?p= and external viewers/media must stay disabled.
@@ -425,7 +534,7 @@ $mountProbeMethod = audit_section(
     $dataPlane, 'protected function probeAfsVolumeMountPoint(',
     'protected function loadKernelMountPoints(', 'provider volume probe');
 
-// Original 18 route classes.
+// Exact route classes.
 audit_classify(
     'TRANSITIONAL', 'save/edit writes',
     $resolveGuard && $writeGuard && $readGuard
@@ -501,13 +610,10 @@ audit_classify(
     'chunk append and finalization are strict provider operations'
 );
 audit_classify(
-    'TRANSITIONAL', 'URL upload destination',
-    $resolveWriteGuard && $importGuard
-        && audit_ordered($urlUploadRoute, array(
-            'if (fm_is_afs_mode()', 'fm_resolve_write_path(',
-            'copy($url, $temp_file, $ctx)', 'fm_import_file('))
-        && strpos($urlUploadRoute, 'rename($temp_file') === false,
-    'managed destination is confined before fetch and imported through the provider; network SSRF policy is separate'
+    'GUARDED-DISABLED', 'URL upload egress',
+    $urlUploadProfileGate && $urlUploadHandlerGate
+        && $urlUploadUiGate && $urlUploadScriptGate,
+    'AFS production denies the request before URL parsing, temporary-file allocation, network fetch, or import and emits no URL-upload UI/JavaScript'
 );
 audit_classify(
     'TRANSITIONAL', 'download/read',
@@ -681,6 +787,7 @@ audit_classify(
             "'embed_enabled' => false",
             "'direct_links_enabled' => false",
             "'raw_previews_enabled' => false",
+            "'url_upload_enabled' => false",
             "'root_url' => ''",
             "\$state['request_identity']",
             "\$state['self_url']",
@@ -771,13 +878,16 @@ audit_classify(
             "defined('FM_SETTINGS_ENABLED')",
             "defined('FM_DIRECT_LINKS_ENABLED')",
             "defined('FM_RAW_PREVIEWS_ENABLED')",
+            "defined('FM_URL_UPLOAD_ENABLED')",
             'fm_afs_readiness_error(',
             "define('FM_SETTINGS_ENABLED', \$settings_enabled)",
             "define('FM_DIRECT_LINKS_ENABLED', \$direct_links_enabled)",
             "define('FM_RAW_PREVIEWS_ENABLED', \$raw_previews_enabled)",
+            "define('FM_URL_UPLOAD_ENABLED', \$url_upload_enabled)",
             'FM_SETTINGS_ENABLED !== false',
             'FM_DIRECT_LINKS_ENABLED !== false',
             'FM_RAW_PREVIEWS_ENABLED !== false',
+            'FM_URL_UPLOAD_ENABLED !== false',
             'fm_afs_readiness_error('))
         && strpos($productionReadyMethod, 'return false;') !== false
         && strpos($dataPlane,
@@ -795,12 +905,12 @@ audit_assert(
     'expected exactly 24 current AFS route/surface classifications'
 );
 audit_assert(
-    $auditCounts['TRANSITIONAL'] === 19,
-    'expected exactly 19 TRANSITIONAL classifications'
+    $auditCounts['TRANSITIONAL'] === 18,
+    'expected exactly 18 TRANSITIONAL classifications'
 );
 audit_assert(
-    $auditCounts['GUARDED-DISABLED'] === 4,
-    'expected exactly 4 GUARDED-DISABLED classifications'
+    $auditCounts['GUARDED-DISABLED'] === 5,
+    'expected exactly 5 GUARDED-DISABLED classifications'
 );
 audit_assert(
     $auditCounts['LIVE-YFS'] === 1,
