@@ -88,6 +88,7 @@ afs_test_ok(
 $csrfSections = array(
     'single delete' => afs_test_section($manager, '// Delete file / folder', '// Create a new file/folder', 'single-delete route'),
     'create' => afs_test_section($manager, '// Create a new file/folder', '// Copy folder / file', 'create route'),
+    'single copy/move' => afs_test_section($manager, '// Complete a single copy/move', '// Mass copy files/ folders', 'single-copy route'),
     'mass copy/move' => afs_test_section($manager, '// Mass copy files/ folders', '// Rename', 'mass-copy route'),
     'rename' => afs_test_section($manager, '// Rename', '// Download', 'rename route'),
     'download' => afs_test_section($manager, '// Download', '// Upload', 'download route'),
@@ -102,6 +103,47 @@ $csrfSections = array(
 foreach ($csrfSections as $label => $section) {
     afs_test_contains($section, "verifyToken(\$_POST['token'])", $label . ' preserves token verification');
 }
+
+// This was a pre-existing upstream GET mutation, not an AFS replay change.
+// Completion must remain a token-verified POST while GET is navigation-only.
+$singleCopy = $csrfSections['single copy/move'];
+afs_test_contains(
+    $singleCopy,
+    "isset(\$_POST['copy'], \$_POST['finish'], \$_POST['token'])",
+    'single-copy completion requires POST fields and a CSRF token'
+);
+afs_test_ok(
+    strpos($singleCopy, "\$_GET['finish']") === false,
+    'single-copy completion has no mutating GET finish route'
+);
+$singleCopyVerify = strpos($singleCopy, "verifyToken(\$_POST['token'])");
+$singleCopyMutation = strpos($singleCopy, 'fm_rename(');
+afs_test_ok(
+    $singleCopyVerify !== false && $singleCopyMutation !== false
+        && $singleCopyVerify < $singleCopyMutation,
+    'single-copy token verification precedes copy or move mutation'
+);
+
+$singleCopyUi = afs_test_section(
+    $manager,
+    "// copy form\nif (isset(\$_GET['copy'])",
+    "if (isset(\$_GET['settings'])",
+    'single-copy navigation form'
+);
+afs_test_contains($singleCopyUi, 'method="post"',
+    'single-copy completion UI submits by POST');
+afs_test_contains($singleCopyUi, 'name="token"',
+    'single-copy completion UI submits the session token');
+afs_test_contains($singleCopyUi, 'name="copy"',
+    'single-copy completion UI submits the source path');
+afs_test_contains($singleCopyUi, 'name="finish" value="1"',
+    'single-copy completion UI submits the completion marker');
+afs_test_contains($singleCopyUi, 'name="move" value="1"',
+    'single-copy completion UI distinguishes move from copy');
+afs_test_ok(
+    strpos($singleCopyUi, '&amp;finish=1') === false,
+    'single-copy completion UI emits no state-changing GET links'
+);
 
 $verifyFunction = afs_test_section($manager, 'function verifyToken($token)', 'function fm_rdelete($path)', 'verifyToken function');
 afs_test_contains($verifyFunction, 'hash_equals(', 'token comparison remains timing-safe');
