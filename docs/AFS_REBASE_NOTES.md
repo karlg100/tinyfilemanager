@@ -1,0 +1,164 @@
+# AFS rebase notes
+
+## Scope and provenance
+
+The AFS-enhanced fork was replayed onto the fetched canonical Tiny File Manager tip without rewriting any remote-tracking ref and without force-pushing.
+
+```text
+origin   https://github.com/karlg100/tinyfilemanager.git
+upstream https://github.com/prasathmani/tinyfilemanager.git
+branch   kag/afs-rebase-upstream-20260817
+```
+
+| Role | Commit |
+| --- | --- |
+| Historical merge base | `2f357ee3d524f1085a7ca2707776c0f33ef85835` |
+| Historical proxy commit | `da98b2aa88d9ba2df7c2d67578710faec4431c3e` |
+| Historical AFS tip | `194b4d034e99e6ad20c99bb31ea512f12a9a916b` |
+| Rebase target (`upstream/master`) | `41491439a6b243c55502581e53fad20bc4c6e777` |
+| Replayed proxy commit | `a2df5e893041a3e18134299058f7aa74ccda96d9` |
+| Replayed AFS commit | `ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1` |
+| Post-rebase AFS hardening | `be98d299ec262e34bb2b759b7742c3dfc18bd3af` |
+
+The authoritative old-to-new mapping is:
+
+```text
+da98b2aa88d9ba2df7c2d67578710faec4431c3e -> a2df5e893041a3e18134299058f7aa74ccda96d9
+194b4d034e99e6ad20c99bb31ea512f12a9a916b -> ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1
+```
+
+The pre-rebase AFS tip is retained at:
+
+```text
+refs/heads/safety/afs-pre-rebase-194b4d0-20260817
+```
+
+Useful provenance checks are:
+
+```sh
+git range-diff --creation-factor=100 \
+  2f357ee3d524f1085a7ca2707776c0f33ef85835..194b4d034e99e6ad20c99bb31ea512f12a9a916b \
+  41491439a6b243c55502581e53fad20bc4c6e777..ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1
+
+git diff --exit-code \
+  194b4d034e99e6ad20c99bb31ea512f12a9a916b:afs.php \
+  ed6cc370c4c6a908e9ffa9aa9d4c4b33be40a8a1:afs.php
+```
+
+The second command is clean: `afs.php` in the replay commit is byte-for-byte the historical file. Any later `afs.php` hardening is intentionally a post-rebase change, not a rewritten historical commit. Because the proxy patch was adapted around substantial upstream changes, `git range-diff` may show it as an old deletion plus a new addition; the explicit mapping above records its provenance.
+
+## Semantic conflict inventory
+
+The three-way audit found one proxy configuration conflict and 16 conflict blocks while replaying the AFS integration. The blocks below are numbered so that every resolution is reviewable even where one conceptual decision covered several adjacent hunks.
+
+### Proxy configuration
+
+| ID | Conflict | Resolution |
+| --- | --- | --- |
+| P-01 | The old proxy declaration expected the end of the 2020 configuration section. Upstream inserted editor-language, external-resource, and `config.php` override support there. | Keep all current upstream configuration. Place the optional `$proxyServer` declaration immediately before `config.php` is loaded, allowing a deployment override. In the URL-upload path, retain upstream URL/port SSRF checks and destination handling; only add the proxy-enabled HTTP stream context. |
+
+The proxy is not a security boundary. A forward proxy performs its own DNS resolution and redirect handling and may be able to reach addresses that the application's hostname check did not anticipate. Its egress policy must therefore be independently restricted and tested.
+
+### Defaults, configuration, and bootstrap
+
+| ID | Conflict | Resolution |
+| --- | --- | --- |
+| AFS-01 | The old AFS commit carried a mixed-CRLF edit to the default JSON and the removed `calc_folder` setting, while upstream now stores `theme`. | Keep the upstream JSON and `theme`; normalize replayed lines to LF. The removed setting is not an AFS feature. |
+| AFS-02 | The fork's site-specific date format overlapped upstream's current date format and new `path_display_mode`. | Keep both current upstream settings. Date formatting can still be changed through deployment configuration. |
+| AFS-03 | The old import point collided with upstream editor mappings, `config.php`, ACE settings, and external-resource configuration. | Keep the whole upstream bootstrap. Define `$afsSupport = false` before `config.php`, load `config.php`, and then conditionally load `__DIR__ . '/afs.php'`. This makes AFS an explicit deployment opt-in and avoids breaking ordinary non-AFS Tiny File Manager installations. |
+| AFS-04 | The fork conditionally omitted `FM_EXCLUDE_ITEMS`; upstream always defines it, serializes it for old PHP, and supports full-path exclusions. | Keep upstream's definition and behavior. Do not restore the fork's undefined-constant fallback. |
+
+The old commit also changed authentication to disabled and disabled the online viewer. Those are deployment preferences, not AFS semantics. The replay deliberately retains upstream's authentication-enabled default, global-readonly behavior, online-viewer default, current theme, and current date format.
+
+### Permission and ACL actions
+
+| ID | Conflict | Resolution |
+| --- | --- | --- |
+| AFS-05 | The fork split the POSIX chmod handler before upstream added CSRF verification. | Retain the upstream `token` requirement, `verifyToken()` failure behavior, validation, translated messages, and redirect. Add only `!$afsSupport` to select the POSIX branch. |
+| AFS-06 | The old AFS ACL POST handler collided with the end of the upstream action section. It had no current CSRF flow, skipped path cleaning, and did not redirect after mutation. | Add a separate AFS branch with the same readonly, platform, CSRF, path-cleaning, existence, message, and post/redirect/get behavior as upstream. The replay preserves the historical normal-ACL update behavior; negative-ACL mutation is a documented follow-up requirement. |
+| AFS-07 | The old AFS ACL form collided with the current POSIX form and main-view boundary. | Keep the current POSIX view for non-AFS mode. Add a Bootstrap-5-aware AFS view using current path-display policy, a hidden CSRF token, guarded ACL arrays, current footer flow, and encoded displayed principals. |
+
+### File-list metadata and table layout
+
+| ID | Conflict | Resolution |
+| --- | --- | --- |
+| AFS-08 | The old table header removed the Owner column with markup from an older Bootstrap/DataTables layout. | Keep the upstream table and suppress only Owner while AFS metadata is displayed. |
+| AFS-09 | Folder permission lookup overlapped upstream's raw/sortable modification time and hardened POSIX owner/group lookup. | Preserve current sorting and POSIX error handling. In AFS mode only, display `fs getcalleraccess` output in the permissions column. |
+| AFS-10 | The folder Owner cell conflicted independently with the new folder-row markup. | Retain current folder actions and hide only the Owner cell in AFS mode. |
+| AFS-11 | File permission and owner lookup conflicted with current size/date sorting, preview, and owner fallback changes. | Preserve all current file-row behavior. Substitute AFS access text for POSIX mode bits and hide only Owner in AFS mode. |
+| AFS-12 | The empty-table colspan was hard-coded for the old column set. | Compute visible metadata and content column counts once and keep the translated upstream empty-folder label. |
+| AFS-13 | The summary-footer colspan and old badges no longer matched upstream's readonly and Bootstrap-5 layouts. | Use the computed total column count while retaining current summary text and badges. |
+
+The parent-directory row was adjusted with the same Owner-column rule; otherwise it would have remained misaligned even if the header and ordinary rows were correct.
+
+### Helpers, assets, and translations
+
+| ID | Conflict | Resolution |
+| --- | --- | --- |
+| AFS-14 | The old one-argument exclusion helper and undefined-constant guard conflicted with upstream's two-argument full-path exclusion helper. | Keep upstream's helper, call signature, serialization compatibility, and filename, extension, and full-path checks unchanged. |
+| AFS-15 | A small historical DataTables version edit expanded into a wide footer/JavaScript conflict after upstream's Bootstrap, resource, CSP, and editor refactors. | Keep the complete upstream footer and configured external resources. Do not downgrade or hard-code DataTables. |
+| AFS-16 | The old inline AFS translations collided with the relocated and expanded `lng()` function and ACE footer code. | Keep the current footer/ACE code. Add each AFS English fallback key once in the current `lng()` table; do not restore the duplicate `admin` entry or replace `translation.json`. |
+
+## Upstream security and behavior deliberately preserved
+
+The replay does not intentionally remove or bypass these post-2020 upstream changes:
+
+- authentication enabled by default, global readonly, per-user roots, and current session handling;
+- CSRF tokens on the current mutation routes, including both POSIX and AFS permission changes;
+- URL-upload localhost/loopback and known-port rejection before the optional proxy context;
+- current path cleaning, archive-item cleaning, filename validation, and NUL-byte rejection;
+- current filename and path output encoding and excluded-name, extension, and full-path checks;
+- current file download token/session behavior, upload naming, and error handling;
+- current Bootstrap, external-resource, translation, theme, editor, sorting, and responsive-table behavior.
+
+Preserving these controls is not a claim that upstream has complete symlink-safe confinement. The AFS-specific gaps below remain material.
+
+## Compatibility blockers at the replay boundary
+
+Do not claim general AFS/AuriStor compatibility from `ed6cc37` alone.
+
+1. Tiny File Manager calls only `Afs::changeAcl()`, `Afs::readAcl()`, and `Afs::getACLAccess()`. Its forms do not use the legacy `command`, `formKey`, `selectedItems`, or `originPath` protocol. The AFS-safe copy, recursive copy/delete, move, and read helpers in `afs.php` are therefore dormant.
+2. Save, backup, create, copy/duplicate, move/rename, delete, upload/chunked upload/URL upload, download, view, direct links, and archive paths still use generic upstream I/O. A lexical `FM_PATH` check does not stop an in-root symlink from reaching an AFS path outside `FM_ROOT_PATH` or a local filesystem path. Direct links bypass PHP entirely.
+3. `Afs::pathSecurity()` in the historical file compares device IDs with `/afs`; it does not prove containment below `FM_ROOT_PATH`. A same-device AFS path outside the configured root can pass, a local filesystem mounted at `/afs` can be misidentified, and an alternate AFS mount root is unsupported.
+4. The replayed `afs.php` assumes a readable `/afs`, `/usr/bin/fs`, enabled `shell_exec`, the POSIX extension, `REMOTE_USER`, and exact English `fs listacl` and `fs getcalleraccess` output. It does not robustly handle all failures.
+5. Dormant paths refer to `filedrawers_rename` and `Mime`, neither of which is supplied by this repository. The undeclared `originPath` property also causes modern-PHP compatibility concerns.
+6. The replayed UI displays negative ACLs but the POST handler updates normal ACLs only. Both lock checkboxes read the `l` state instead of `k`, so their initial state can be wrong. A negative entry with all boxes cleared is not posted.
+7. The historical constructor performs request processing and `getcalleraccess`, after which the listing calls `getcalleraccess` again. This produces two subprocesses per listed item and gives construction unexpected side effects.
+8. OpenAFS ACLs are directory-oriented. The UI offers permission editing for files as well as directories; exact OpenAFS and AuriStor behavior must be established on the target client and server versions.
+9. A proxy can change URL-upload name resolution and reachable networks. The retained upstream hostname check is not a substitute for proxy-side egress policy.
+
+## Post-rebase fixes and automated tests
+
+The two mapped commits above are the historical replay layer and should remain unchanged. Hardening and tests belong in one or more commits after `ed6cc37` so `git range-diff` continues to show what was replayed versus what was newly repaired.
+
+Commit `be98d299ec262e34bb2b759b7742c3dfc18bd3af` implements the separately reviewable production hardening:
+
+- fail-closed AFS availability, path, stat, command-execution, and parser handling;
+- removal of constructor request/shell side effects and exactly one explicit access lookup per listed item;
+- declared runtime state, all seven standard caller-access flags including `k`, and testable ACL parsing;
+- case-preserving round trips for standard `lrwidka` and AuriStor auxiliary `A-H` rights, so uppercase `A`/`D` cannot be confused with lowercase admin/delete;
+- negative ACL updates, correct `k` checkbox state, clearing ACL entries, and one `fs` invocation per positive or negative ACL set;
+- inherited AuriStor ACL detection with read-only UI and server-side mutation rejection, avoiding accidental materialization of an inherited file ACL;
+- strict ACL-output validation that rejects unknown rights, duplicate rights, missing headers, and malformed command output;
+- safe missing-`filedrawers_rename` behavior, complete copy writes including flush/close failures, partial-destination cleanup, recursive-copy ancestry rejection, and correct symlink destination names;
+- a test-overridable AFS root and command runner while retaining the production defaults `/afs` and `/usr/bin/fs`;
+- explicit retention of the narrower ACL display/edit claim because generic data-plane routing was not changed.
+
+The case and inheritance handling follows the AuriStor [`fs listacl`](https://www.auristor.com/documentation/man/linux/1/fs_listacl.html) and [`fs setacl`](https://www.auristor.com/documentation/man/linux/1/fs_setacl.html) contracts: auxiliary rights are uppercase `A-H`, inherited file ACLs are marked in list output, and setting an ACL on such a file creates a file-specific ACL.
+
+The no-live-mount regression layer is intentionally separate as well:
+
+- `tests/afs_regression.php` exercises ACL parsing and command construction, case-sensitive auxiliary rights, inherited ACLs, caller-access flags, path/device rejection, handle-time copy/read checks, broken symlinks, and helper inventory without touching `/afs`.
+- `tests/afs_static.php` checks default-off/config ordering, conditional `__DIR__` loading, retained upstream CSRF/URL-upload/exclusion controls, normal and negative ACL handling, all 15 rights, inherited-ACL gates, `k` mapping, batching, and one `getcalleraccess` call per listed item.
+- `tests/afs_io_path_audit.php` inventories the generic endpoints. Until they are integrated, it records exact expected failures for save/backup, create, copy/duplicate, move/rename, delete, uploads, download/view/direct links, archives, symlink traversal, and mount-point traversal. An expected-failure audit must fail if the unsafe baseline changes unexpectedly; it must never silently convert an untested path into a pass.
+- Run PHP lint on `tinyfilemanager.php`, `afs.php`, and every PHP test, followed by all three focused suites and any available upstream checks.
+
+The focused suite passed under PHP 7.4 and PHP 8.3: 46 regression assertions, 124 static assertions, and 80 I/O-path checks. The I/O audit reports four protected primitives, two fail-closed gates, 18 intentional expected failures, and zero unexpected failures. The PHP 7.4 run used the official `php:7.4-cli-alpine` image at digest `sha256:0d67d81f60f4a400f1b68e3a41e910c98c5e08f49e515f6855561a0f24d37852`.
+
+Static tests can validate dispatch, parsing, escaping, and fail-closed behavior, but they cannot validate PAG/token inheritance, AFS kernel behavior, ACL enforcement, mount points, volume boundaries, or the deployed `fs` output. Those claims require the disposable live plan in `docs/LIVE_AFS_TEST_PLAN.md`.
+
+## Remaining compatibility blockers
+
+The hardening commit repairs the actively integrated ACL surface and several dormant helpers; it does not wire Tiny File Manager's generic data plane into those helpers. A blanket AFS/AuriStor compatibility claim therefore remains blocked by all 18 expected-failure routes in `tests/afs_io_path_audit.php`, including direct links, archive operations, symlink traversal, and mount-point traversal.
+
+Additional live-only blockers are web-worker token/PAG identity, real OpenAFS and AuriStor `fs` output, file-versus-directory ACL semantics, same- and cross-volume behavior, unavailable/read-only mounts, and writeback failures. Positive and negative ACL sets require separate `fs` commands, so a failure between the two batches can still leave a partial cross-set update; that failure mode must be exercised and documented live. The upstream Dockerfile copies only `tinyfilemanager.php`, not `afs.php`, so its image is ordinary default-off Tiny File Manager rather than an AFS-capable deployment artifact. Data-plane wiring and AFS container packaging should be developed on distinct follow-on branches so the historical replay and ACL hardening remain reviewable.
