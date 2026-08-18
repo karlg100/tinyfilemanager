@@ -2,7 +2,7 @@
 
 ## Scope and provenance
 
-The AFS-enhanced fork was replayed onto the fetched canonical Tiny File Manager tip without rewriting any remote-tracking ref. Its seven branch-local commits were later recreated to correct author and committer email metadata, then published with an explicitly authorized force-with-lease. Named safety refs retain both earlier histories. The later provider/readiness work described below is a local integration lane and has not been pushed; public GitHub remotes remain source references rather than its deployment destination.
+The AFS-enhanced fork was replayed onto the fetched canonical Tiny File Manager tip without rewriting any remote-tracking ref. Its seven branch-local commits were later recreated to correct author and committer email metadata, then published with an explicitly authorized force-with-lease. Named safety refs retain both earlier histories. The provider/readiness work described below is part of this environment-neutral application branch. Deployment policy and runtime configuration are maintained separately and are not included here.
 
 ```text
 origin   https://github.com/karlg100/tinyfilemanager.git
@@ -178,7 +178,7 @@ The no-live-mount regression layer is intentionally separate as well:
 - `tests/afs_readiness.php` executes the immutable profile, provider/factory identity binding, exact CSP, settings/direct/raw/embed/URL-upload gates, and canonical JSON asset-manifest checks. It covers missing/extra rows and fields, licenses, required `defer`, lowercase SHA-256, traversal, symlinks, missing files, and manifest-file confinement. These checks do not establish web-server authentication provenance, CSP behavior in a browser, transitive assets, HTTP delivery, or a production descriptor boundary.
 - Run PHP lint on `tinyfilemanager.php`, `afs.php`, and every PHP test, followed by every focused suite and any available upstream checks.
 
-The finalized local lane is linted and executed under both PHP 7.4 and PHP 8.3. It includes 135 regression assertions, 559 static integration assertions, 306 readiness assertions, and a 24-classification/165-assertion I/O audit. The route result is 18 `TRANSITIONAL`, 5 `GUARDED-DISABLED`, 1 `LIVE-YFS`, 0 `PROTECTED`, 0 `XFAIL`, and zero failures. A green result proves the stated dispatch and fail-closed contracts only; it is not deployability evidence.
+The finalized application lane is linted and executed under both PHP 7.4 and PHP 8.3. It includes 137 regression assertions, 564 static integration assertions, 306 readiness assertions, and a 24-classification/165-assertion I/O audit. The route result is 18 `TRANSITIONAL`, 5 `GUARDED-DISABLED`, 1 `LIVE-YFS`, 0 `PROTECTED`, 0 `XFAIL`, and zero failures. A green result proves the stated dispatch and fail-closed contracts only; it is not deployability evidence.
 
 Static tests can validate dispatch, parsing, escaping, and fail-closed behavior, but they cannot validate PAG/token inheritance, AFS kernel behavior, ACL enforcement, mount points, volume boundaries, or the deployed `fs` output. Those claims require the disposable live plan in `docs/LIVE_AFS_TEST_PLAN.md`.
 

@@ -997,14 +997,15 @@ class Afs
 
     function get_returnToURI()
     {
-        return ( 'https://' .
-                  $_SERVER['HTTP_HOST'] .
-              $_SERVER['PHP_SELF'] .
-              "?path=" .
-              urlencode($this->path) .
-              "&" .
-              "finishid=" .
-                  $this->sid );
+        if ( !defined( 'FM_SELF_URL' )) {
+            return '';
+        }
+        return ( FM_SELF_URL .
+                 "?path=" .
+                 urlencode($this->path) .
+                 "&" .
+                 "finishid=" .
+                 $this->sid );
     }
 
     /*

@@ -315,6 +315,28 @@ afs_test_ok(
     'factory/provider identity, readiness, and boundary checks precede initialization'
 );
 
+$legacyReturnUri = afs_test_section(
+    $afs,
+    'function get_returnToURI()',
+    'Return a string escaped for a javascript string literal.',
+    'legacy AFS return URI'
+);
+afs_test_contains(
+    $legacyReturnUri,
+    'FM_SELF_URL',
+    'legacy AFS return URI uses the validated controller URL'
+);
+afs_test_not_contains(
+    $legacyReturnUri,
+    'HTTP_HOST',
+    'legacy AFS return URI never trusts the request Host header'
+);
+afs_test_not_contains(
+    $legacyReturnUri,
+    "\$_SERVER['PHP_SELF']",
+    'legacy AFS return URI never re-reads an unvalidated request path'
+);
+
 // The immutable profile validates the application's constructed state, not a
 // deployment-supplied assertion. Its trusted request identity is snapshotted
 // once and later passed unchanged to the provider factory.

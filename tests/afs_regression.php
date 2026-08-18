@@ -187,6 +187,19 @@ $aclOutput = "Access list for /afs/example is\n"
     . "  blocked lkAH\n";
 
 $afs = new AfsTestDouble();
+check($afs->get_returnToURI() === '',
+    'legacy AFS return URI fails closed until FM_SELF_URL is defined');
+$afs->path = '/afs/example.test/users/alice/My Folder';
+$afs->sid = 'fixed-session-id';
+$_SERVER['HTTP_HOST'] = 'attacker.example';
+$_SERVER['PHP_SELF'] = '//attacker.example/redirect';
+define('FM_SELF_URL', '/tinyfilemanager.php');
+check(
+    $afs->get_returnToURI()
+        === '/tinyfilemanager.php?path=%2Fafs%2Fexample.test%2Fusers%2Falice%2FMy+Folder'
+            . '&finishid=fixed-session-id',
+    'legacy AFS return URI uses FM_SELF_URL instead of request host or script data'
+);
 $acl = $afs->parseAclOutput($aclOutput);
 check($acl['inherited'] === false, 'marks a normal ACL as explicit');
 check(isset($acl['normal']['alice']), 'parses a normal ACL principal');
