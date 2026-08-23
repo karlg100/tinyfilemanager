@@ -2,19 +2,17 @@
 /**
  * Dependency-free AFS I/O call-site audit.
  *
- * XFAIL means the endpoint is known to bypass the guarded Afs primitives.
- * An XFAIL is successful only while the exact expected-gap structure remains.
- * If a call site changes, this audit fails so the classification must be
- * reviewed instead of silently turning a stale XFAIL into a compatibility
- * claim.
+ * Request routes use a filesystem-neutral root guard before any optional AFS
+ * helper. This audit prevents a route from silently returning to raw PHP I/O.
  */
 
 $root = dirname(__DIR__);
 $manager = @file_get_contents($root . '/tinyfilemanager.php');
 $afs = @file_get_contents($root . '/afs.php');
+$guard = @file_get_contents($root . '/lib/fm_root_confinement.php');
 
-if ($manager === false || $afs === false) {
-    fwrite(STDERR, "FAIL: unable to read tinyfilemanager.php and afs.php\n");
+if ($manager === false || $afs === false || $guard === false) {
+    fwrite(STDERR, "FAIL: unable to read manager, AFS, and root-guard sources\n");
     exit(2);
 }
 
@@ -231,149 +229,126 @@ $copyHelper = afs_audit_section($manager, 'function fm_copy($f1, $f2, $upd)', 'f
 $downloadHelper = afs_audit_section($manager, 'function fm_download_file(', 'class FM_Zipper', 'fm_download_file');
 $archiveHelpers = afs_audit_section($manager, 'class FM_Zipper', '//--- Templates Functions ---', 'archive helper classes');
 
-afs_audit_xfail(
+afs_audit_protected(
     'save/edit writes',
-    afs_audit_unwired($save)
-        && strpos($save, 'fopen($file_path, "w")') !== false
-        && strpos($save, '@fwrite($fd, $writedata)') !== false,
-    'AJAX save writes the resolved path directly without an AFS handle/device guard'
+    strpos($save, 'fm_guard_existing(') !== false
+        && strpos($save, 'fm_guard_write(') !== false,
+    'editor writes require a canonical guarded file path'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'backup writes',
-    afs_audit_unwired($backup)
-        && strpos($backup, 'copy($fullyQualifiedFileName, $fullPath . $newFileName)') !== false,
-    'backup uses PHP copy directly and can follow a same-root symlink outside AFS'
+    strpos($backup, 'fm_guard_existing(') !== false
+        && strpos($backup, 'fm_guard_copy_file(') !== false,
+    'backup reads and creates only guard-approved files'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'file and directory creation',
-    afs_audit_unwired($createRoute)
-        && strpos($createRoute, "@fopen(\$path . '/' . \$new, 'w')") !== false
+    strpos($createRoute, 'fm_guard_open_write(') !== false
         && strpos($createRoute, "fm_mkdir(\$path . '/' . \$new, false)") !== false
-        && afs_audit_unwired($mkdirHelper)
-        && strpos($mkdirHelper, 'mkdir($dir, 0777, true)') !== false,
-    'create routes use fopen/mkdir without checking the target directory device'
+        && strpos($mkdirHelper, 'fm_guard_mkdir(') !== false,
+    'file and directory creation dispatch through guarded primitives'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'copy',
-    afs_audit_unwired($copyRoute)
-        && strpos($copyRoute, 'fm_rcopy($from, $dest)') !== false
-        && afs_audit_unwired($recursiveCopy)
-        && strpos($recursiveCopy, 'return fm_copy($path, $dest, $upd)') !== false
-        && afs_audit_unwired($copyHelper)
-        && strpos($copyHelper, 'copy($f1, $f2)') !== false,
-    'copy dispatches through generic recursive PHP copy, not Afs::copy/copy_dirs'
+    strpos($copyRoute, 'fm_rcopy($from, $dest)') !== false
+        && strpos($recursiveCopy, 'fm_guard_copy_tree(') !== false
+        && strpos($copyHelper, 'fm_guard_copy_file(') !== false,
+    'copy recursion revalidates each source and destination'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'duplicate',
-    afs_audit_unwired($copyRoute)
-        && strpos($copyRoute, 'fm_rcopy($from, $fn_duplicate, False)') !== false,
-    'same-directory duplicate uses the same unguarded fm_rcopy path'
+    strpos($copyRoute, 'fm_rcopy($from, $fn_duplicate, False)') !== false
+        && strpos($recursiveCopy, 'fm_guard_copy_tree(') !== false,
+    'same-directory duplicate uses guarded recursive copy'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'move',
-    afs_audit_unwired($copyRoute . $massCopyRoute)
-        && strpos($copyRoute, 'fm_rename($from, $dest)') !== false
+    strpos($copyRoute, 'fm_rename($from, $dest)') !== false
         && strpos($massCopyRoute, 'fm_rename($from, $dest)') !== false
-        && afs_audit_unwired($renameHelper)
-        && strpos($renameHelper, 'rename($old, $new)') !== false,
-    'single and mass move use generic rename without source/destination device checks'
+        && strpos($renameHelper, 'fm_guard_rename(') !== false,
+    'single and mass move validate both entries'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'rename',
-    afs_audit_unwired($renameRoute)
-        && strpos($renameRoute, "fm_rename(\$path . '/' . \$old, \$path . '/' . \$new)") !== false
-        && afs_audit_unwired($renameHelper),
-    'rename is not routed through the AFS/filedrawers-safe primitive'
+    strpos($renameRoute, "fm_rename(\$path . '/' . \$old, \$path . '/' . \$new)") !== false
+        && strpos($renameHelper, 'fm_guard_rename(') !== false,
+    'rename is confined independently of the backing filesystem'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'single and bulk delete',
-    afs_audit_unwired($deleteRoute . $massDeleteRoute)
-        && strpos($deleteRoute, "fm_rdelete(\$path . '/' . \$del)") !== false
+    strpos($deleteRoute, "fm_rdelete(\$path . '/' . \$del)") !== false
         && strpos($massDeleteRoute, 'fm_rdelete($new_path)') !== false
-        && afs_audit_unwired($deleteHelper)
-        && strpos($deleteHelper, 'unlink($path)') !== false
-        && strpos($deleteHelper, 'rmdir($path)') !== false,
-    'delete uses generic unlink/rmdir recursion rather than Afs::removeFolder/deleteFiles'
+        && strpos($deleteHelper, 'fm_guard_delete(') !== false,
+    'delete unlinks links but never descends through an unapproved target'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'single-part upload',
-    afs_audit_unwired($uploadRoute)
-        && strpos($uploadRoute, 'move_uploaded_file($tmp_name, $fullPath)') !== false,
-    'the final uploaded-file destination is not device-checked'
+    strpos($uploadRoute, 'fm_guard_import_uploaded_file(') !== false
+        && strpos($uploadRoute, 'fm_guard_create_path(') !== false,
+    'uploaded bytes enter only a guarded, new destination'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'chunked upload',
-    afs_audit_unwired($uploadRoute)
-        && strpos($uploadRoute, '"{$fullPath}.part"') !== false
-        && strpos($uploadRoute, 'fopen("{$fullPath}.part"') !== false
-        && strpos($uploadRoute, 'rename("{$fullPath}.part", $fullPathTarget)') !== false,
-    'chunk append and final rename operate directly on the requested path'
+    strpos($uploadRoute, 'fm_guard_open_write("{$fullPath}.part"') !== false
+        && strpos($uploadRoute, 'fm_guard_rename("{$fullPath}.part"') !== false,
+    'chunk append and final rename remain confined'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'URL upload',
-    afs_audit_unwired($urlUpload)
-        && strpos($urlUpload, 'copy($url, $temp_file, $ctx)') !== false
-        && strpos($urlUpload, "rename(\$temp_file, strtok(get_file_path(), '?'))") !== false,
-    'SSRF checks are retained, but the final filesystem rename is not AFS-confined'
+    strpos($urlUpload, 'copy($url, $temp_file, $ctx)') !== false
+        && strpos($urlUpload, "fm_guard_import_file(\$temp_file, strtok(get_file_path(), '?'))") !== false,
+    'temporary download remains outside the root; only guarded import can enter it'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'download/read',
-    afs_audit_unwired($downloadRoute)
-        && strpos($downloadRoute, 'fm_download_file(') !== false
-        && afs_audit_unwired($downloadHelper)
-        && strpos($downloadHelper, 'realpath($fileLocation)') !== false
-        && strpos($downloadHelper, 'readfile($fileLocation)') !== false,
-    'download follows realpath and calls PHP readfile instead of Afs::readfile'
+    strpos($downloadRoute, 'fm_guard_existing(') !== false
+        && strpos($downloadHelper, 'fm_guard_open_read(') !== false
+        && strpos($downloadHelper, 'readfile(') === false,
+    'download streams only from a validated open handle'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'view/preview reads',
-    afs_audit_unwired($viewer)
-        && strpos($viewer, 'file_get_contents($file_path)') !== false
-        && strpos($viewer, 'is_file($path . \'/\' . $file)') !== false,
-    'viewer follows file symlinks and reads without validating the opened handle device'
+    strpos($viewer, 'fm_guard_existing(') !== false
+        && strpos($viewer, 'fm_guard_read($file_path)') !== false,
+    'viewer resolves and reads through the root guard'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'direct links',
-    afs_audit_unwired($directLinks)
-        && substr_count($directLinks, "lng('DirectLink')") === 2
-        && substr_count($directLinks, 'FM_ROOT_URL') === 2,
-    'links hand paths to the web server, bypassing PHP and every Afs guard'
+    substr_count($directLinks, "lng('DirectLink')") === 2
+        && strpos($directLinks, 'FM_ROOT_URL') === false
+        && strpos($directLinks, '&amp;raw=') !== false
+        && strpos($manager, "if (isset(\$_GET['raw']))") !== false,
+    'file links return through guarded application streaming; folders navigate in-app'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'archive creation',
-    afs_audit_unwired($archiveCreateRoute . $archiveHelpers)
-        && strpos($archiveCreateRoute, 'new FM_Zipper()') !== false
+    strpos($archiveCreateRoute, 'new FM_Zipper()') !== false
         && strpos($archiveCreateRoute, 'new FM_Zipper_Tar()') !== false
-        && strpos($archiveHelpers, 'addFile($filename)') !== false
-        && strpos($archiveHelpers, 'scandir($path)') !== false,
-    'ZIP/TAR creation recursively reads paths without AFS device or symlink boundaries'
+        && substr_count($archiveHelpers, 'fm_guard_existing(') >= 8
+        && substr_count($archiveHelpers, 'fm_guard_scandir(') >= 2,
+    'archive writers validate every recursively visited object'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'archive extraction',
-    afs_audit_unwired($archiveExtractRoute . $archiveHelpers)
-        && strpos($archiveExtractRoute, 'extractTo($path, null, true)') !== false
-        && substr_count($archiveHelpers, 'extractTo($path)') >= 2,
-    'ZIP/TAR extraction writes directly to a path without per-entry AFS confinement'
+    strpos($archiveExtractRoute, 'new FM_Zipper_Tar()') !== false
+        && strpos($archiveExtractRoute . $archiveHelpers, 'extractTo(') === false
+        && substr_count($archiveHelpers, 'fm_guard_archive_member(') >= 4
+        && substr_count($archiveHelpers, 'fm_guard_open_write(') >= 2,
+    'archive members are validated before guarded per-file extraction'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'symlink traversal',
-    afs_audit_unwired($deleteHelper . $recursiveCopy . $viewer . $directLinks)
-        && strpos($deleteHelper, 'if (is_link($path))') !== false
-        && strpos($deleteHelper, 'return unlink($path)') !== false
-        && strpos($recursiveCopy, 'if (is_dir($path))') !== false
-        && strpos($recursiveCopy, 'is_link(') === false
-        && strpos($viewer, 'file_get_contents($file_path)') !== false,
-    'delete unlinks a link, but copy/view/direct-link paths can follow it outside AFS'
+    strpos($guard, 'function fm_guard_existing') !== false
+        && strpos($guard, 'realpath($absolute)') !== false
+        && strpos($guard, 'fm_guard_path_is_within($real, $config[\'root\'])') !== false,
+    'resolved symlink targets must remain below the canonical root'
 );
-afs_audit_xfail(
+afs_audit_protected(
     'mount-point traversal',
-    afs_audit_unwired($deleteHelper . $recursiveCopy . $archiveHelpers)
-        && strpos($deleteHelper, 'scandir($path)') !== false
-        && strpos($recursiveCopy, 'scandir($path)') !== false
-        && strpos($archiveHelpers, 'scandir($path)') !== false
-        && strpos($deleteHelper . $recursiveCopy . $archiveHelpers, 'lstat(') === false
-        && strpos($deleteHelper . $recursiveCopy . $archiveHelpers, "['dev']") === false,
-    'generic recursion treats mount points as directories and never checks st_dev'
+    strpos($guard, "\$stat['dev'] != \$config['device']") !== false
+        && strpos($guard, "file_get_contents('/proc/self/mountinfo')") !== false
+        && strpos($guard, 'fm_guard_crosses_nested_mount($real)') !== false,
+    'device changes and Linux nested/bind mountpoints are rejected'
 );
 
 echo 'SUMMARY: ' . $auditProtected . ' protected, '
