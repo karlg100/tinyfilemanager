@@ -75,6 +75,26 @@ function http_request($url, $method = 'GET', $body = null, $contentType = null)
     return array($status, $response, $received);
 }
 
+function http_header_is($headers, $name, $value)
+{
+    foreach ($headers as $header) {
+        if (stripos($header, $name . ':') === 0) {
+            return trim(substr($header, strlen($name) + 1)) === $value;
+        }
+    }
+    return false;
+}
+
+function http_header_starts_with($headers, $name, $value)
+{
+    foreach ($headers as $header) {
+        if (stripos($header, $name . ':') === 0) {
+            return strpos(trim(substr($header, strlen($name) + 1)), $value) === 0;
+        }
+    }
+    return false;
+}
+
 function form_body($values)
 {
     return http_build_query($values, '', '&');
@@ -156,14 +176,31 @@ try {
     $token = $match[1];
     http_check(strpos($page[1], 'delegated-cache-link') === false, 'list route hides an escaping delegated-cache symlink');
     http_check(strpos($page[1], 'raw=inside.txt') !== false, 'direct file link returns through guarded raw streaming');
+    http_check(strpos($page[1], 'edit=inside.txt') !== false, 'list route exposes the ordinary editor');
+
+    $editPage = http_request($base . '?p=&edit=inside.txt');
+    http_check($editPage[0] === 200
+        && strpos($editPage[1], 'id="normal-editor"') !== false
+        && strpos($editPage[1], 'inside-route-data') !== false
+        && strpos($editPage[1], '&amp;env=ace') === false,
+        'ordinary editor remains available without the active Ace editor');
 
     $raw = http_request($base . '?p=&raw=inside.txt');
     http_check($raw[0] === 200 && $raw[1] === 'inside-route-data', 'direct-link route streams an in-root file');
+    http_check(http_header_is($raw[2], 'Content-Type', 'application/octet-stream'), 'direct-link stream uses a non-active content type');
+    http_check(http_header_starts_with($raw[2], 'Content-Disposition', 'attachment;'), 'direct-link stream is an attachment');
+    http_check(http_header_is($raw[2], 'X-Content-Type-Options', 'nosniff'), 'direct-link stream disables content sniffing');
     $view = http_request($base . '?p=&view=inside.txt');
-    http_check($view[0] === 200 && strpos($view[1], 'inside-route-data') !== false, 'view route reads an in-root file');
+    http_check($view[0] === 200 && $view[1] === 'inside-route-data', 'legacy view route streams an in-root file');
+    http_check(http_header_is($view[2], 'Content-Type', 'application/octet-stream'), 'legacy view stream uses a non-active content type');
+    http_check(http_header_starts_with($view[2], 'Content-Disposition', 'attachment;'), 'legacy view stream is an attachment');
+    http_check(http_header_is($view[2], 'X-Content-Type-Options', 'nosniff'), 'legacy view stream disables content sniffing');
     $download = http_request($base . '?p=&dl=inside.txt', 'POST',
         form_body(array('token' => $token)), 'application/x-www-form-urlencoded');
     http_check($download[0] === 200 && $download[1] === 'inside-route-data', 'download route streams an in-root file');
+    http_check(http_header_is($download[2], 'Content-Type', 'application/octet-stream'), 'download stream uses a non-active content type');
+    http_check(http_header_starts_with($download[2], 'Content-Disposition', 'attachment;'), 'download stream is an attachment');
+    http_check(http_header_is($download[2], 'X-Content-Type-Options', 'nosniff'), 'download stream disables content sniffing');
 
     if (is_link($data . '/delegated-cache-link')) {
         foreach (array(
@@ -232,16 +269,13 @@ try {
         http_check(count(glob($data . '/*.tar')) === count($beforeArchives), 'archive creation rejects an escaping symlink');
     }
 
+    $beforeArchives = glob($data . '/dest/*.tar');
     http_request($base . '?p=dest', 'POST', form_body(array(
         'group' => '1', 'tar' => 'tar', 'file' => array('renamed.txt'), 'token' => $token,
     )), 'application/x-www-form-urlencoded');
-    $archives = glob($data . '/dest/renamed.txt_*.tar');
-    http_check(count($archives) === 1, 'archive route creates a confined TAR');
-    unlink($data . '/dest/renamed.txt');
-    http_request($base . '?p=dest', 'POST', form_body(array(
-        'unzip' => basename($archives[0]), 'token' => $token,
-    )), 'application/x-www-form-urlencoded');
-    http_check(file_get_contents($data . '/dest/renamed.txt') === 'move-route-data', 'archive extraction writes a validated in-root member');
+    http_check(count(glob($data . '/dest/*.tar')) === count($beforeArchives)
+        && file_get_contents($data . '/dest/renamed.txt') === 'move-route-data',
+        'archive creation remains disabled without changing the source file');
 
     http_request($base . '?p=dest&del=renamed.txt', 'POST',
         form_body(array('token' => $token)), 'application/x-www-form-urlencoded');

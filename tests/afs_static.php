@@ -79,9 +79,9 @@ afs_test_ok(
 $ajax = afs_test_section($manager, '// Handle all AJAX Request', '// Delete file / folder', 'AJAX dispatcher');
 afs_test_contains($ajax, "isset(\$_POST['ajax'], \$_POST['token'])", 'AJAX dispatcher requires a token field');
 $ajaxVerify = strpos($ajax, "verifyToken(\$_POST['token'])");
-$ajaxSearch = strpos($ajax, '//search');
+$ajaxAction = strpos($ajax, '// save editor file');
 afs_test_ok(
-    $ajaxVerify !== false && $ajaxSearch !== false && $ajaxVerify < $ajaxSearch,
+    $ajaxVerify !== false && $ajaxAction !== false && $ajaxVerify < $ajaxAction,
     'AJAX token is verified before request-specific actions'
 );
 
@@ -147,20 +147,6 @@ afs_test_ok(
 
 $verifyFunction = afs_test_section($manager, 'function verifyToken($token)', 'function fm_rdelete($path)', 'verifyToken function');
 afs_test_contains($verifyFunction, 'hash_equals(', 'token comparison remains timing-safe');
-
-// Preserve the current URL-upload boundary checks and the fork's proxy path.
-$urlUpload = afs_test_section($manager, '//upload using url', "    exit();\n}", 'URL-upload route');
-afs_test_contains($urlUpload, 'preg_match("|^http(s)?://.+$|"', 'URL upload accepts only HTTP(S)-shaped URLs');
-afs_test_contains($urlUpload, 'parse_url($url, PHP_URL_HOST)', 'URL upload parses the destination host');
-afs_test_contains($urlUpload, 'parse_url($url, PHP_URL_PORT)', 'URL upload parses the destination port');
-afs_test_contains($urlUpload, '^localhost$', 'URL upload rejects localhost');
-afs_test_contains($urlUpload, '^127', 'URL upload rejects IPv4 loopback');
-afs_test_contains($urlUpload, '0*1$', 'URL upload rejects IPv6 loopback');
-afs_test_contains($urlUpload, '$knownPorts = [22, 23, 25, 3306];', 'URL upload preserves the blocked-port baseline');
-afs_test_contains($urlUpload, 'basename($fileinfo->name)', 'URL-upload destination is reduced to a basename');
-afs_test_contains($urlUpload, "strtok(get_file_path(), '?')", 'URL-upload destination strips a query suffix');
-afs_test_contains($urlUpload, "'proxy' => 'tcp://' . \$proxyServer", 'non-cURL URL upload preserves configured proxy support');
-afs_test_contains($urlUpload, "'request_fulluri' => true", 'proxy requests retain absolute request URIs');
 
 // Preserve exclusion behavior added upstream: configured exact names, wildcard
 // extensions, and full paths all remain excluded from listing/view/edit.

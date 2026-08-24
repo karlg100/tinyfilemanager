@@ -32,7 +32,6 @@ function route_section($source, $start, $end)
 $routes = array(
     'edit/save' => array('// save editor file', '// backup files', array('fm_guard_existing(', 'fm_guard_write(')),
     'backup' => array('// backup files', '// Save Config', array('fm_guard_copy_file(')),
-    'URL upload' => array('//upload using url', "    exit();\n}", array('fm_guard_import_file(')),
     'delete' => array('// Delete file / folder', '// Create a new file/folder', array('fm_rdelete(')),
     'create' => array('// Create a new file/folder', '// Copy folder / file', array('fm_guard_open_write(', 'fm_mkdir(')),
     'copy/move' => array('// Copy folder / file', '// Mass copy files/ folders', array('fm_rcopy(', 'fm_rename(')),
@@ -77,4 +76,3 @@ foreach (array(
 }
 
 echo "PASS: $checks route-confinement static checks\n";
-

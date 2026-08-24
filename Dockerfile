@@ -24,5 +24,6 @@ WORKDIR /var/www/html
 COPY tinyfilemanager.php index.php
 COPY afs.php translation.json ./
 COPY lib ./lib
+COPY assets ./assets
 
 CMD ["sh", "-c", "php -S 0.0.0.0:80"]

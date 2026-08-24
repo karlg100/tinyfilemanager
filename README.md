@@ -33,8 +33,13 @@ Tinyfilemanager is highly documented on the [wiki pages](https://github.com/pras
 
 Download ZIP with latest version from master branch.
 
-Copy `tinyfilemanager.php` and the `lib` directory to your webspace. The root-confinement library is required and must remain next to the script.
+Copy `tinyfilemanager.php`, `lib`, and `assets` to your webspace. The root-confinement library and hash-pinned local browser assets are required and must remain next to the script. Deployments serving assets from another same-origin path may set `$asset_base_url` in `config.php`.
 You can also change the file name from "tinyfilemanager.php" to something else, you know what i meant for.
+
+The compatibility-pilot profile intentionally disables server-side URL upload,
+recursive search, archive create/extract, remote viewers, active inline preview,
+and the Ace editor. Ordinary list, create, upload, edit, copy, move, rename,
+delete, and attachment download operations remain available.
 
 Default username/password: **admin/admin@123** and **user/12345**.
 

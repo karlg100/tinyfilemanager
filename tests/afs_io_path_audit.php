@@ -206,7 +206,6 @@ afs_audit_protected(
 // Snapshot the request handlers and generic filesystem helpers.
 $save = afs_audit_section($manager, '// save editor file', '// backup files', 'save route');
 $backup = afs_audit_section($manager, '// backup files', '// Save Config', 'backup route');
-$urlUpload = afs_audit_section($manager, '//upload using url', "    exit();\n}", 'URL-upload route');
 $deleteRoute = afs_audit_section($manager, '// Delete file / folder', '// Create a new file/folder', 'single-delete route');
 $createRoute = afs_audit_section($manager, '// Create a new file/folder', '// Copy folder / file', 'create route');
 $copyRoute = afs_audit_section($manager, '// Copy folder / file', '// Mass copy files/ folders', 'single-copy route');
@@ -292,12 +291,6 @@ afs_audit_protected(
     strpos($uploadRoute, 'fm_guard_open_write("{$fullPath}.part"') !== false
         && strpos($uploadRoute, 'fm_guard_rename("{$fullPath}.part"') !== false,
     'chunk append and final rename remain confined'
-);
-afs_audit_protected(
-    'URL upload',
-    strpos($urlUpload, 'copy($url, $temp_file, $ctx)') !== false
-        && strpos($urlUpload, "fm_guard_import_file(\$temp_file, strtok(get_file_path(), '?'))") !== false,
-    'temporary download remains outside the root; only guarded import can enter it'
 );
 afs_audit_protected(
     'download/read',
