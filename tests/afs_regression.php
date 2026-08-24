@@ -1,5 +1,6 @@
 <?php
 
+require_once dirname(__DIR__) . '/lib/fm_root_confinement.php';
 require_once dirname(__DIR__) . '/afs.php';
 
 final class AfsTestDouble extends Afs
@@ -57,6 +58,38 @@ final class AfsFilesystemDouble extends Afs
     }
 }
 
+final class AfsMountAvailabilityDouble extends Afs
+{
+    public function __construct()
+    {
+        // availabilityForTest() supplies a synthetic /afs stat result.
+    }
+
+    public function availabilityForTest($statAvailable)
+    {
+        $this->afsStat = $statAvailable ? array('dev' => 1) : false;
+        return $this->afsMountIsAvailable();
+    }
+}
+
+final class AfsNoShellDouble extends Afs
+{
+    public function __construct()
+    {
+        // The disabled-exec regression exercises the parent command runner.
+    }
+
+    protected function pathSecurity($path = '')
+    {
+        return $path === '' ? false : rtrim($path, '/');
+    }
+
+    public function lastFsStatusForTest()
+    {
+        return $this->lastFsStatus;
+    }
+}
+
 $tests = 0;
 
 function check($condition, $message)
@@ -86,6 +119,42 @@ function remove_test_tree($path)
         }
     }
     @rmdir($path);
+}
+
+$namespaceRoot = "10 0 0:1 / / rw - overlay overlay rw\n";
+$GLOBALS['FM_ROOT_GUARD_MOUNTINFO'] = $namespaceRoot
+    . "11 10 0:2 / /afs rw - auristorfs none rw\n";
+$availability = new AfsMountAvailabilityDouble();
+check($availability->availabilityForTest(true) === true,
+    'constructor availability accepts a statable auristorfs mount at /afs');
+$GLOBALS['FM_ROOT_GUARD_MOUNTINFO'] = $namespaceRoot
+    . "11 10 0:2 / /afs rw - afs none rw\n";
+check($availability->availabilityForTest(true) === true,
+    'constructor availability accepts a statable OpenAFS mount at /afs');
+$GLOBALS['FM_ROOT_GUARD_MOUNTINFO'] = $namespaceRoot
+    . "11 10 8:1 / /afs rw - ext4 /dev/root rw\n";
+check($availability->availabilityForTest(true) === false,
+    'constructor availability rejects an ordinary filesystem at /afs');
+$GLOBALS['FM_ROOT_GUARD_MOUNTINFO'] = "malformed mountinfo\n";
+check($availability->availabilityForTest(true) === false,
+    'constructor availability fails closed for malformed mountinfo');
+$GLOBALS['FM_ROOT_GUARD_MOUNTINFO'] = $namespaceRoot
+    . "11 10 0:2 / /afs rw - auristorfs none rw\n";
+check($availability->availabilityForTest(false) === false,
+    'constructor availability still requires a successful /afs stat');
+unset($GLOBALS['FM_ROOT_GUARD_MOUNTINFO']);
+
+if (!function_exists('exec')) {
+    $noShell = new AfsNoShellDouble();
+    check($noShell->getACLAccess('/afs/example') === '',
+        'getcalleraccess fails closed when exec is disabled');
+    check($noShell->lastFsStatusForTest() === 126,
+        'disabled exec records the unavailable-shell status');
+    check($noShell->lookupPriv === 0 && $noShell->readPriv === 0
+        && $noShell->writePriv === 0 && $noShell->insertPriv === 0
+        && $noShell->deletePriv === 0 && $noShell->lockPriv === 0
+        && $noShell->adminPriv === 0,
+        'disabled exec grants no caller-access rights');
 }
 
 $aclOutput = "Access list for /afs/example is\n"

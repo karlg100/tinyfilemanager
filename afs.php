@@ -61,14 +61,7 @@ class Afs
         $this->startCWD = getcwd();
         $this->afsStat  = @stat( $this->afsRoot );
 
-        // Bug 2634811 Fixed: Make sure /afs isn't on the local filesystem
-        $rootStat = @stat( '/' );
-
-        if ( !is_array( $this->afsStat ) || !is_array( $rootStat )
-          || $this->afsStat['dev'] == $rootStat['dev'] ) {
-            error_log( "$this->afsRoot is unavailable or has the same device ID as / " .
-                "(is afs actually mounted?): $this->uniqname, " .
-                "$this->errorMsg " . __FILE__ );
+        if ( !$this->afsMountIsAvailable() ) {
             $this->errorMsg = 'AFS is not mounted.';
             return;
         }
@@ -82,8 +75,6 @@ class Afs
 
         // Generate the path of the folder one level above the current
         if ( !preg_match( "/(.*\/)([^\/]+)\/?$/", $this->path, $Matches )) {
-            error_log( "missing homedir: [$this->path] $this->uniqname, " .
-                "$this->errorMsg " . __FILE__ );
             $this->errorMsg = 'Missing home directory.';
             return;
         }
@@ -96,6 +87,18 @@ class Afs
 
         $this->formKey = $_SESSION['formKey'];
         $this->sid     = md5( uniqid( rand(), true ));
+    }
+
+    protected function afsMountIsAvailable()
+    {
+        if ( !is_array( $this->afsStat )
+          || !function_exists( 'fm_guard_mountinfo_records' )
+          || !function_exists( 'fm_guard_root_uses_allowlisted_afs' )) {
+            return false;
+        }
+
+        $records = fm_guard_mountinfo_records();
+        return fm_guard_root_uses_allowlisted_afs( '/afs', $records );
     }
 
 

@@ -252,6 +252,22 @@ afs_test_ok(
     substr_count($constructor, 'getACLAccess(') === 0,
     'Afs construction does not perform an implicit getcalleraccess query'
 );
+afs_test_contains($constructor, '@stat( $this->afsRoot )',
+    'Afs construction retains the /afs stat availability check');
+afs_test_ok(strpos($constructor, "@stat( '/' )") === false,
+    'Afs construction does not stat the open_basedir-inaccessible filesystem root');
+afs_test_contains($constructor, 'fm_guard_mountinfo_records()',
+    'Afs construction reads the fail-closed mountinfo records');
+afs_test_contains($constructor, 'fm_guard_root_uses_allowlisted_afs( \'/afs\', $records )',
+    'Afs construction requires an allowlisted AFS filesystem covering /afs');
+afs_test_ok(strpos($constructor, 'error_log(') === false,
+    'Afs constructor failure paths do not call disabled error_log');
+
+$runFs = afs_test_section($afs, 'protected function runFs', 'public function get_foldercontents_js', 'AFS command runner');
+afs_test_contains($runFs, "function_exists( 'exec' )",
+    'AFS command runner checks whether exec is available');
+afs_test_contains($runFs, '$this->lastFsStatus = 126;',
+    'AFS command runner records a fail-closed unavailable-shell status');
 
 $folderListing = afs_test_section($manager, '$ii = 3399;', '$ik = 8002;', 'folder-listing loop');
 $fileListing = afs_test_section($manager, '$ik = 8002;', 'if (empty($folders) && empty($files))', 'file-listing loop');
