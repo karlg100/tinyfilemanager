@@ -345,7 +345,7 @@ $afs->getACLAccessBatch($payloadPaths);
 check(count($afs->commands) === $payloadCommandCount + 2
     && count($afs->commands[$payloadCommandCount]) === 65
     && count($afs->commands[$payloadCommandCount + 1]) === 3,
-    'getcalleraccess batches split before the 262144-byte payload ceiling');
+    'getcalleraccess batches split before the 262144-byte broker payload ceiling');
 
 $afs->responses[] = '';
 check($afs->changeAcl('user;touch /tmp/not-run', 'rl', '/afs/a path') === true,

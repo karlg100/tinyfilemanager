@@ -997,10 +997,350 @@ class Afs
         return $access;
     }
 
+    private static $aclBrokerStream = null;
+    private static $aclBrokerUnavailable = false;
+    private static $aclBrokerRequests = 0;
+
+    private static function brokerDeadline()
+    {
+        if ( !function_exists( 'hrtime' )) {
+            return false;
+        }
+        $now = hrtime( true );
+        if ( !is_int( $now ) || $now > PHP_INT_MAX - 6000000000 ) {
+            return false;
+        }
+        return $now + 6000000000;
+    }
+
+    private static function brokerSetDeadline( $stream, $deadline )
+    {
+        if ( !function_exists( 'hrtime' )) {
+            return false;
+        }
+        $now = hrtime( true );
+        if ( !is_int( $now )) {
+            return false;
+        }
+        $remaining = $deadline - $now;
+        if ( $remaining <= 0 ) {
+            return false;
+        }
+        $seconds = (int)floor( $remaining / 1000000000 );
+        $microseconds = (int)floor(( $remaining % 1000000000 ) / 1000 );
+        if ( $seconds === 0 && $microseconds === 0 ) {
+            $microseconds = 1;
+        }
+        return @stream_set_timeout( $stream, $seconds, $microseconds );
+    }
+
+    private static function brokerReadExact( $stream, $length, $deadline )
+    {
+        $data = '';
+        while ( strlen( $data ) < $length ) {
+            if ( !self::brokerSetDeadline( $stream, $deadline )) {
+                return false;
+            }
+            $part = fread( $stream, $length - strlen( $data ));
+            $metadata = stream_get_meta_data( $stream );
+            if ( $part === false || $part === ''
+              || !empty( $metadata['timed_out'] )) {
+                return false;
+            }
+            $data .= $part;
+        }
+        return $data;
+    }
+
+    private static function brokerPackString( $value )
+    {
+        if ( !is_string( $value ) || strlen( $value ) > 4095
+          || strpos( $value, "\0" ) !== false
+          || strpos( $value, "\r" ) !== false
+          || strpos( $value, "\n" ) !== false ) {
+            return false;
+        }
+        return pack( 'n', strlen( $value )) . $value;
+    }
+
+    private static function brokerTake( $payload, &$offset, $length )
+    {
+        if ( !is_int( $offset ) || !is_int( $length ) || $length < 0
+          || $offset < 0 || $offset + $length > strlen( $payload )) {
+            return false;
+        }
+        $value = substr( $payload, $offset, $length );
+        $offset += $length;
+        return $value;
+    }
+
+    private static function brokerTakeU16( $payload, &$offset )
+    {
+        $bytes = self::brokerTake( $payload, $offset, 2 );
+        if ( $bytes === false ) {
+            return false;
+        }
+        $value = unpack( 'nvalue', $bytes );
+        return $value['value'];
+    }
+
+    private static function brokerRequest( $operation, $flags, $payload )
+    {
+        if ( self::$aclBrokerUnavailable || self::$aclBrokerRequests >= 64
+          || !is_string( $payload ) || strlen( $payload ) > 262144 ) {
+            return false;
+        }
+        if ( self::$aclBrokerStream === null ) {
+            $fd = getenv( 'AURISTOR_AFS_ACL_BROKER_FD' );
+            if ( !is_string( $fd ) || !preg_match( '/^[0-9]{1,2}$/D', $fd )
+              || (int)$fd < 3 || (int)$fd > 63 ) {
+                self::$aclBrokerUnavailable = true;
+                return false;
+            }
+            self::$aclBrokerStream = @fopen( 'php://fd/' . $fd, 'r+b' );
+            if ( self::$aclBrokerStream === false ) {
+                self::$aclBrokerStream = null;
+                self::$aclBrokerUnavailable = true;
+                return false;
+            }
+            stream_set_blocking( self::$aclBrokerStream, true );
+        }
+
+        $request = pack( 'a4CCCCN', 'AACL', 1, $operation, $flags, 0,
+            strlen( $payload )) . $payload;
+        $deadline = self::brokerDeadline();
+        if ( $deadline === false ) {
+            self::$aclBrokerUnavailable = true;
+            return false;
+        }
+        $written = 0;
+        while ( $written < strlen( $request )) {
+            if ( !self::brokerSetDeadline(
+                    self::$aclBrokerStream, $deadline )) {
+                self::$aclBrokerUnavailable = true;
+                return false;
+            }
+            $count = @fwrite( self::$aclBrokerStream,
+                substr( $request, $written ));
+            $metadata = stream_get_meta_data( self::$aclBrokerStream );
+            if ( $count === false || $count === 0
+              || !empty( $metadata['timed_out'] )) {
+                self::$aclBrokerUnavailable = true;
+                return false;
+            }
+            $written += $count;
+        }
+        self::$aclBrokerRequests++;
+
+        $deadline = self::brokerDeadline();
+        if ( $deadline === false ) {
+            self::$aclBrokerUnavailable = true;
+            return false;
+        }
+        $headerBytes = self::brokerReadExact(
+            self::$aclBrokerStream, 12, $deadline );
+        if ( $headerBytes === false ) {
+            self::$aclBrokerUnavailable = true;
+            return false;
+        }
+        $header = unpack(
+            'a4magic/Cversion/Coperation/Cstatus/Creserved/Nlength',
+            $headerBytes );
+        if ( $header['magic'] !== 'AACL' || $header['version'] !== 1
+          || $header['operation'] !== $operation || $header['reserved'] !== 0
+          || $header['length'] > 262144 ) {
+            self::$aclBrokerUnavailable = true;
+            return false;
+        }
+        $body = self::brokerReadExact(
+            self::$aclBrokerStream, $header['length'], $deadline );
+        if ( $body === false ) {
+            self::$aclBrokerUnavailable = true;
+            return false;
+        }
+        return array( 'status' => $header['status'], 'payload' => $body );
+    }
+
+    private function runBrokerFs( $arguments )
+    {
+        if ( $arguments[0] === 'getcalleraccess' ) {
+            $paths = array_slice( $arguments,
+                isset( $arguments[1] ) && $arguments[1] === '-path' ? 2 : 1 );
+            if ( empty( $paths ) || count( $paths ) > 128 ) {
+                $this->lastFsStatus = 125;
+                return false;
+            }
+            $payload = pack( 'n', count( $paths ));
+            foreach ( $paths as $path ) {
+                $encoded = self::brokerPackString( $path );
+                if ( $encoded === false ) {
+                    $this->lastFsStatus = 125;
+                    return false;
+                }
+                $payload .= $encoded;
+            }
+            $response = self::brokerRequest( 1, 0, $payload );
+            if ( $response === false || $response['status'] !== 0 ) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $offset = 0;
+            $count = self::brokerTakeU16( $response['payload'], $offset );
+            if ( $count !== count( $paths )) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $lines = array();
+            $failed = false;
+            foreach ( $paths as $path ) {
+                $item = self::brokerTake( $response['payload'], $offset, 2 );
+                if ( $item === false ) {
+                    $this->lastFsStatus = 126;
+                    return false;
+                }
+                $status = ord( $item[0] );
+                $rightsLength = ord( $item[1] );
+                $rights = self::brokerTake(
+                    $response['payload'], $offset, $rightsLength );
+                if ( $rights === false
+                  || !preg_match( '/^[lrwidkaA-H]{0,15}$/D', $rights )) {
+                    $this->lastFsStatus = 126;
+                    return false;
+                }
+                if ( $status === 0 ) {
+                    $lines[] = 'Callers access to ' . $path . ' is ' . $rights;
+                } else {
+                    $failed = true;
+                }
+            }
+            if ( $offset !== strlen( $response['payload'] )) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $this->lastFsStatus = $failed ? 1 : 0;
+            return implode( "\n", $lines );
+        }
+
+        if ( $arguments[0] === 'listacl' && count( $arguments ) === 2 ) {
+            $path = self::brokerPackString( $arguments[1] );
+            $response = $path === false ? false
+                : self::brokerRequest( 2, 0, $path );
+            if ( $response === false || $response['status'] !== 0 ) {
+                $this->lastFsStatus = 1;
+                return false;
+            }
+            $offset = 0;
+            $prefix = self::brokerTake( $response['payload'], $offset, 5 );
+            if ( $prefix === false ) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $inherited = ord( $prefix[0] );
+            $counts = unpack( 'nnormal/nnegative', substr( $prefix, 1 ));
+            if ( $inherited > 1 || $counts['normal'] > 256
+              || $counts['negative'] > 256 ) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $lines = array(
+                'Access list' . ( $inherited ? ' (inherited)' : '' )
+                    . ' for ' . $arguments[1] . ' is',
+                'Normal rights:'
+            );
+            foreach ( array( 'normal', 'negative' ) as $section ) {
+                if ( $section === 'negative' ) {
+                    $lines[] = 'Negative rights:';
+                }
+                for ( $index = 0; $index < $counts[$section]; $index++ ) {
+                    $principalLength = self::brokerTakeU16(
+                        $response['payload'], $offset );
+                    $principal = $principalLength === false ? false
+                        : self::brokerTake( $response['payload'], $offset,
+                            $principalLength );
+                    $rightSize = self::brokerTake(
+                        $response['payload'], $offset, 1 );
+                    $rights = $rightSize === false ? false
+                        : self::brokerTake( $response['payload'], $offset,
+                            ord( $rightSize ));
+                    if ( $principal === false || $principal === ''
+                      || preg_match( '/\s/', $principal )
+                      || $rights === false
+                      || !preg_match( '/^(none|[lrwidkaA-H]{1,15})$/D',
+                            $rights )) {
+                        $this->lastFsStatus = 126;
+                        return false;
+                    }
+                    $lines[] = '  ' . $principal . ' ' . $rights;
+                }
+            }
+            if ( $offset !== strlen( $response['payload'] )) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $this->lastFsStatus = 0;
+            return implode( "\n", $lines );
+        }
+
+        if ( $arguments[0] === 'sa' ) {
+            $negative = isset( $arguments[1] )
+                && $arguments[1] === '-negative';
+            $pathIndex = $negative ? 2 : 1;
+            if ( count( $arguments ) < $pathIndex + 3
+              || ( count( $arguments ) - $pathIndex - 1 ) % 2 !== 0 ) {
+                $this->lastFsStatus = 125;
+                return false;
+            }
+            $path = self::brokerPackString( $arguments[$pathIndex] );
+            $entryCount = (int)(( count( $arguments )
+                - $pathIndex - 1 ) / 2 );
+            if ( $path === false || $entryCount < 1 || $entryCount > 256 ) {
+                $this->lastFsStatus = 125;
+                return false;
+            }
+            $payload = chr( $negative ? 1 : 0 ) . $path
+                . pack( 'n', $entryCount );
+            for ( $index = $pathIndex + 1; $index < count( $arguments );
+                  $index += 2 ) {
+                $principal = $arguments[$index];
+                $rights = $arguments[$index + 1];
+                if ( !is_string( $principal ) || $principal === ''
+                  || strlen( $principal ) > 512 || $principal[0] === '-'
+                  || preg_match( '/\s/', $principal )
+                  || !preg_match( '/^(none|[lrwidkaA-H]{1,15})$/D',
+                        $rights )) {
+                    $this->lastFsStatus = 125;
+                    return false;
+                }
+                $payload .= pack( 'n', strlen( $principal )) . $principal
+                    . chr( strlen( $rights )) . $rights;
+            }
+            $response = self::brokerRequest( 3, $negative ? 1 : 0, $payload );
+            if ( $response === false || $response['status'] !== 0
+              || $response['payload'] !== '' ) {
+                $this->lastFsStatus = 1;
+                return false;
+            }
+            $this->lastFsStatus = 0;
+            return '';
+        }
+
+        $this->lastFsStatus = 125;
+        return false;
+    }
+
     protected function runFs( $arguments )
     {
         if ( !is_array( $arguments ) || empty( $arguments )) {
             return false;
+        }
+
+        if ( getenv( 'AURISTOR_AFS_ACL_BROKER' ) === '1' ) {
+            if ( getenv( 'AURISTOR_AFS_ACL_BROKER_DIALECT' )
+                !== 'auristor' ) {
+                $this->lastFsStatus = 125;
+                return false;
+            }
+            return $this->runBrokerFs( $arguments );
         }
 
         $command = 'LC_ALL=C ' . escapeshellarg( $this->afsUtils . '/fs' );

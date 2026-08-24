@@ -266,10 +266,36 @@ afs_test_ok(strpos($constructor, 'error_log(') === false,
     'Afs constructor failure paths do not call disabled error_log');
 
 $runFs = afs_test_section($afs, 'protected function runFs', 'public function get_foldercontents_js', 'AFS command runner');
+afs_test_contains($runFs, "getenv( 'AURISTOR_AFS_ACL_BROKER' ) === '1'",
+    'container ACL operations prefer the private request broker');
+afs_test_contains($runFs, '$this->runBrokerFs( $arguments )',
+    'container ACL operations use the typed broker client');
+afs_test_contains($runFs, "getenv( 'AURISTOR_AFS_ACL_BROKER_DIALECT' )",
+    'typed container ACL operations require an explicit provider dialect');
+afs_test_contains($runFs, "!== 'auristor'",
+    'the typed broker contract is explicitly AuriStor-only');
+$brokerClient = afs_test_section($afs, 'private static function brokerSetDeadline', 'private function runBrokerFs', 'typed ACL broker client');
+afs_test_contains($afs, "function_exists( 'hrtime' )",
+    'broker frames fail closed without a monotonic PHP clock');
+afs_test_contains($brokerClient, '$now = hrtime( true );',
+    'broker frames use a monotonic absolute PHP deadline');
+afs_test_ok(strpos($brokerClient, 'microtime(') === false,
+    'broker frame deadlines never use the adjustable wall clock');
+afs_test_contains($brokerClient, 'self::$aclBrokerRequests >= 64',
+    'broker operations retain a bounded budget above the 512-row boundary');
 afs_test_contains($runFs, "function_exists( 'exec' )",
-    'AFS command runner checks whether exec is available');
+    'native AFS command fallback checks whether exec is available');
 afs_test_contains($runFs, '$this->lastFsStatus = 126;',
     'AFS command runner records a fail-closed unavailable-shell status');
+foreach (array(
+    "self::brokerRequest( 1, 0, \$payload )",
+    "self::brokerRequest( 2, 0, \$path )",
+    "self::brokerRequest( 3, \$negative ? 1 : 0, \$payload )",
+    "pack( 'a4CCCCN', 'AACL', 1, \$operation, \$flags, 0,"
+) as $brokerContract) {
+    afs_test_contains($afs, $brokerContract,
+        'typed ACL broker contract is present: ' . $brokerContract);
+}
 
 $folderListing = afs_test_section($manager, '$ii = 3399;', '$ik = 8002;', 'folder-listing loop');
 $fileListing = afs_test_section($manager, '$ik = 8002;', 'if (empty($folders) && empty($files))', 'file-listing loop');

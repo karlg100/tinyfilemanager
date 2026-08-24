@@ -179,6 +179,24 @@ The no-live-mount regression layer is intentionally separate as well:
 
 The original focused suite passed under PHP 7.4 and PHP 8.3. After the independent-review fixes, PHP 8.3 passes 68 regression assertions, 138 static assertions, and 84 I/O-path checks. The I/O audit still reports four protected primitives, two fail-closed gates, 18 intentional expected failures, and zero unexpected failures. PHP 7.4 independently passes the dotted/spaced nested-key fixture, but the complete updated tree was not rerun under 7.4 because the managed environment rejected mounting this private worktree into the generic public image. The earlier full PHP 7.4 run used `php:7.4-cli-alpine` at digest `sha256:0d67d81f60f4a400f1b68e3a41e910c98c5e08f49e515f6855561a0f24d37852`.
 
+The request-broker/batching branch adds `getACLAccessBatch()` with both a
+128-path and 262144-byte payload boundary, exact mixed-result mapping, and a
+versioned typed broker client at the existing `runFs()` seam. The client
+permits at most 64 typed operations per request, so the 512/513 row boundary
+does not silently lose its fifth batch while the total remains bounded. Each
+request and response frame uses one absolute six-second monotonic `hrtime()`
+deadline rather than resetting the timeout after partial I/O, and fails closed
+when that monotonic clock is unavailable. The broker client exposes only
+caller-access, ACL-read, and bounded ACL-change operations; it cannot carry an
+executable, shell, environment, or raw output. If the trusted launcher does
+not advertise the broker, native installations retain the escaped CLI
+fallback. PHP 7.4 and 8.3 both pass 84 regression assertions, 151 static
+assertions, and 59 pilot feature-gate assertions for this branch. Live PAG
+inheritance and AuriStor `/proc/self/fd/N` behavior remain deployment gates,
+not automated-test claims. The typed broker also requires the explicit
+`auristor` dialect marker; OpenAFS `fs setacl -dir` syntax is not silently
+treated as the AuriStor `-path` contract.
+
 Static tests can validate dispatch, parsing, escaping, and fail-closed behavior, but they cannot validate PAG/token inheritance, AFS kernel behavior, ACL enforcement, mount points, volume boundaries, or the deployed `fs` output. Those claims require the disposable live plan in `docs/LIVE_AFS_TEST_PLAN.md`.
 
 ## Remaining compatibility blockers
