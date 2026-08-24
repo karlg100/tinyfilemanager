@@ -45,6 +45,11 @@ final class AfsFilesystemDouble extends Afs
         $this->path = $path;
     }
 
+    public function pathSecurityForTest($path)
+    {
+        return $this->pathSecurity($path);
+    }
+
     public function copyItemForTest($source, $target)
     {
         return $this->copyItem($source, $target);
@@ -298,6 +303,19 @@ try {
     chdir($originalCwd);
     check($fsAfs->setPath($inside) === true && $fsAfs->path === $inside,
         'setPath accepts a same-device path');
+
+    $GLOBALS['FM_ROOT_GUARD'] = array(
+        'root' => $tempRoot,
+        'device' => $device + 1,
+        'allow_afs_device_transitions' => true,
+    );
+    $fsAfs->configureFilesystem($device + 1, $originalCwd);
+    check($fsAfs->makePathAFSlocal($inside) === true,
+        'mount-verified AFS guard accepts a descendant volume device transition');
+    chdir($originalCwd);
+    check($fsAfs->pathSecurityForTest($inside) === realpath($inside),
+        'pathSecurity returns the canonical descendant across an AFS volume transition');
+    unset($GLOBALS['FM_ROOT_GUARD']);
 
     $fsAfs->configureFilesystem($device + 1, $originalCwd);
     check($fsAfs->makePathAFSlocal($inside) === false,

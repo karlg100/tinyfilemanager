@@ -59,6 +59,13 @@ class Afs
         $this->uniqname = isset( $_SERVER['REMOTE_USER'] )
             ? $_SERVER['REMOTE_USER'] : '';
         $this->startCWD = getcwd();
+        if ( function_exists( 'fm_guard_config' )) {
+            $guard = fm_guard_config();
+            if ( is_array( $guard ) && isset( $guard['root'] )
+              && is_string( $guard['root'] ) && $guard['root'] !== '' ) {
+                $this->afsRoot = $guard['root'];
+            }
+        }
         $this->afsStat  = @stat( $this->afsRoot );
 
         if ( !$this->afsMountIsAvailable() ) {
@@ -98,7 +105,20 @@ class Afs
         }
 
         $records = fm_guard_mountinfo_records();
-        return fm_guard_root_uses_allowlisted_afs( '/afs', $records );
+        return fm_guard_root_uses_allowlisted_afs(
+            $this->afsRoot, $records );
+    }
+
+    protected function afsDeviceIsAllowed( $path, $device )
+    {
+        if ( function_exists( 'fm_guard_config' )
+          && function_exists( 'fm_guard_device_is_allowed' )
+          && fm_guard_config() !== false ) {
+            return fm_guard_device_is_allowed( $path, (int)$device );
+        }
+
+        return is_array( $this->afsStat )
+            && $this->afsStat['dev'] == $device;
     }
 
 
@@ -559,7 +579,9 @@ class Afs
             return true;
         }
 
-        if ( !( $sourceHdl = @fopen( $source, "rb" ))) {
+        $safeSource = $this->pathSecurity( $source );
+        if ( !$safeSource
+          || !( $sourceHdl = @fopen( $safeSource, "rb" ))) {
             @chdir( $this->startCWD );
             return false;
         }
@@ -567,7 +589,8 @@ class Afs
         $sourceStat = fstat( $sourceHdl );
 
         if ( !is_array( $sourceStat )
-          || $sourceStat['dev'] != $this->afsStat['dev'] ) {
+          || !$this->afsDeviceIsAllowed(
+                $safeSource, $sourceStat['dev'] )) {
             @fclose( $sourceHdl );
             @chdir( $this->startCWD );
             return false;
@@ -633,9 +656,12 @@ class Afs
 
         clearstatcache();
 
-        if ( $handle = @fopen( $this->path, "rb" )) {
+        $safePath = $this->pathSecurity( $this->path );
+        $handle = $safePath ? @fopen( $safePath, "rb" ) : false;
+        if ( $handle ) {
             $stat = fstat( $handle );
-            if ( is_array( $stat ) && $stat['dev'] == $this->afsStat['dev'] ) {
+            if ( is_array( $stat )
+              && $this->afsDeviceIsAllowed( $safePath, $stat['dev'] )) {
                 while ( !feof( $handle )) {
                     $buffer = fread( $handle, 1024 * 1024 );
                     if ( $buffer === false ) {
@@ -1051,17 +1077,22 @@ class Afs
             return false;
         }
 
-        /* The path is only safe if we're in AFS at the end of it.
-         * This test is raceable - so we should check again before sending
-         * anything to the client.
-         */
+        if ( function_exists( 'fm_guard_config' )
+          && function_exists( 'fm_guard_existing' )
+          && fm_guard_config() !== false ) {
+            $safePath = fm_guard_existing( $path );
+            return $safePath === false ? false : rtrim( $safePath, '/' );
+        }
+
+        /* Native compatibility fallback when no configured root guard exists.
+         * Container deployments always take the guard path above. */
         clearstatcache();
 
         if ( !$pathStat = @stat( $path )) {
             return false;
         }
 
-        if ( $this->afsStat["dev"] !=  $pathStat["dev"] ) {
+        if ( !$this->afsDeviceIsAllowed( $path, $pathStat['dev'] )) {
             return false;
         }
 
@@ -1077,14 +1108,22 @@ class Afs
             return false;
         }
 
-        if ( !@chdir( $path )) {
+        $guarded = function_exists( 'fm_guard_config' )
+            && function_exists( 'fm_guard_existing' )
+            && fm_guard_config() !== false;
+        $safePath = $guarded ? fm_guard_existing( $path, 'dir' ) : $path;
+        if ( $safePath === false || !@chdir( $safePath )) {
             $this->errorMsg = "Couldn't change directory";
             return false;
         }
 
         clearstatcache();
         $stat = @stat( '.' );
-        if ( !is_array( $stat ) || $this->afsStat['dev'] != $stat['dev'] ) {
+        $current = @realpath( '.' );
+        $current = $current === false ? false : rtrim( $current, '/' );
+        if ( !is_array( $stat ) || $current === false
+          || !$this->afsDeviceIsAllowed( $current, $stat['dev'] )
+          || ( $guarded && fm_guard_existing( $current, 'dir' ) === false )) {
             $this->errorMsg = "Path not in AFS";
             @chdir( $this->startCWD );
             return false;

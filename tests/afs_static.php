@@ -253,13 +253,15 @@ afs_test_ok(
     'Afs construction does not perform an implicit getcalleraccess query'
 );
 afs_test_contains($constructor, '@stat( $this->afsRoot )',
-    'Afs construction retains the /afs stat availability check');
+    'Afs construction stats the native or configured AFS root');
+afs_test_contains($constructor, '$this->afsRoot = $guard[\'root\']',
+    'Afs construction adopts the canonical configured root guard');
 afs_test_ok(strpos($constructor, "@stat( '/' )") === false,
     'Afs construction does not stat the open_basedir-inaccessible filesystem root');
 afs_test_contains($constructor, 'fm_guard_mountinfo_records()',
     'Afs construction reads the fail-closed mountinfo records');
-afs_test_contains($constructor, 'fm_guard_root_uses_allowlisted_afs( \'/afs\', $records )',
-    'Afs construction requires an allowlisted AFS filesystem covering /afs');
+afs_test_contains($constructor, '$this->afsRoot, $records',
+    'Afs construction requires an allowlisted AFS filesystem covering its exact root');
 afs_test_ok(strpos($constructor, 'error_log(') === false,
     'Afs constructor failure paths do not call disabled error_log');
 

@@ -142,6 +142,7 @@ echo "AFS I/O path audit\n";
 
 // Guarded primitives retained in afs.php. These checks do not imply that the
 // Tiny File Manager request handlers call them.
+$deviceAllowed = afs_audit_section($afs, 'protected function afsDeviceIsAllowed', '// Symlink safe method', 'Afs::afsDeviceIsAllowed');
 $pathSecurity = afs_audit_section($afs, 'function pathSecurity', 'public function makePathAFSlocal', 'Afs::pathSecurity');
 $makeLocal = afs_audit_section($afs, 'public function makePathAFSlocal', '// Checks to see if there is a folder', 'Afs::makePathAFSlocal');
 $removeFolder = afs_audit_section($afs, 'public function removeFolder', 'public function deleteFiles', 'Afs::removeFolder');
@@ -153,33 +154,36 @@ $readPrimitive = afs_audit_section($afs, 'function readfile()', '// Change the A
 
 afs_audit_fail_closed(
     'path acceptance on a non-AFS device',
-    strpos($pathSecurity, '@stat( $path )') !== false
-        && preg_match('/\$this->afsStat\[[\'\"]dev[\'\"]\]\s*!=\s*\$pathStat\[[\'\"]dev[\'\"]\]/', $pathSecurity) === 1
+    strpos($deviceAllowed, 'fm_guard_device_is_allowed( $path, (int)$device )') !== false
+        && strpos($pathSecurity, 'fm_guard_existing( $path )') !== false
+        && strpos($pathSecurity, '$this->afsDeviceIsAllowed( $path, $pathStat[\'dev\'] )') !== false
         && strpos($pathSecurity, 'return false;') !== false,
-    'pathSecurity rejects a path whose st_dev differs from /afs'
+    'pathSecurity requires the canonical root guard and permits only mount-verified AFS transitions'
 );
 afs_audit_fail_closed(
     'directory-local operation on a non-AFS device',
-    strpos($makeLocal, '@chdir( $path )') !== false
-        && preg_match('/\$this->afsStat\[[\'\"]dev[\'\"]\]\s*!=\s*\$stat\[[\'\"]dev[\'\"]\]/', $makeLocal) === 1
+    strpos($makeLocal, "fm_guard_existing( \$path, 'dir' )") !== false
+        && strpos($makeLocal, '$this->afsDeviceIsAllowed( $current, $stat[\'dev\'] )') !== false
         && strpos($makeLocal, 'Path not in AFS') !== false
         && strpos($makeLocal, '@chdir( $this->startCWD )') !== false
         && strpos($makeLocal, 'return false;') !== false,
-    'makePathAFSlocal restores cwd and rejects the device mismatch'
+    'makePathAFSlocal restores cwd unless the canonical directory passes the root and device policy'
 );
 afs_audit_protected(
     'AFS file-copy primitive',
     strpos($copyPrimitive, 'fstat( $sourceHdl )') !== false
-        && strpos($copyPrimitive, '$sourceStat[\'dev\'] != $this->afsStat[\'dev\']') !== false
+        && strpos($copyPrimitive, '$safeSource = $this->pathSecurity( $source )') !== false
+        && strpos($copyPrimitive, '$this->afsDeviceIsAllowed(') !== false
         && substr_count($copyPrimitive, 'makePathAFSlocal(') >= 2
         && strpos($copyPrimitive, 'fopen( basename( $dest ), "xb" )') !== false,
-    'source handle st_dev and destination directory are checked; overwrite is refused'
+    'canonical source handle device and destination directory are checked; overwrite is refused'
 );
 afs_audit_protected(
     'AFS file-read primitive',
     strpos($readPrimitive, 'fstat( $handle )') !== false
-        && strpos($readPrimitive, '$stat[\'dev\'] == $this->afsStat[\'dev\']') !== false,
-    'bytes are emitted only after checking the opened handle device'
+        && strpos($readPrimitive, '$safePath = $this->pathSecurity( $this->path )') !== false
+        && strpos($readPrimitive, '$this->afsDeviceIsAllowed( $safePath, $stat[\'dev\'] )') !== false,
+    'bytes are emitted only after canonical path and opened-handle device checks'
 );
 afs_audit_protected(
     'AFS recursive delete helper',
