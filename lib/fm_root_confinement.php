@@ -22,6 +22,9 @@ function fm_guard_init($root)
     $GLOBALS['FM_ROOT_GUARD'] = array(
         'root' => $real,
         'device' => $stat['dev'],
+        'allow_afs_device_transitions' =>
+            defined('FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS')
+            && FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS === true,
     );
     return $real;
 }
@@ -90,6 +93,26 @@ function fm_guard_config()
     return isset($GLOBALS['FM_ROOT_GUARD'])
         && is_array($GLOBALS['FM_ROOT_GUARD'])
         ? $GLOBALS['FM_ROOT_GUARD'] : false;
+}
+
+/**
+ * AuriStor volume traversal can report a different st_dev below /afs without
+ * creating a Linux VFS mountpoint. Deployments may explicitly accept that
+ * provider behavior while retaining canonical-root and mountinfo checks.
+ */
+function fm_guard_device_is_allowed($path, $device)
+{
+    $config = fm_guard_config();
+    if ($config === false || !is_string($path) || !is_int($device)) {
+        return false;
+    }
+    if ($device == $config['device']) {
+        return true;
+    }
+
+    return !empty($config['allow_afs_device_transitions'])
+        && $path !== $config['root']
+        && fm_guard_path_is_within($path, $config['root']);
 }
 
 function fm_guard_mount_unescape($path)
@@ -179,7 +202,7 @@ function fm_guard_existing($path, $type = null)
     }
 
     $stat = @stat($real);
-    if (!is_array($stat) || $stat['dev'] != $config['device']) {
+    if (!is_array($stat) || !fm_guard_device_is_allowed($real, $stat['dev'])) {
         return false;
     }
     if ($type === 'file' && !is_file($real)) {
@@ -285,7 +308,7 @@ function fm_guard_open_read($path)
     clearstatcache(true, $file);
     $current = @realpath($file);
     $currentStat = $current === false ? false : @stat($current);
-    if (!is_array($stat) || $stat['dev'] != $config['device']
+    if (!is_array($stat) || !fm_guard_device_is_allowed($file, $stat['dev'])
         || !is_array($currentStat) || $currentStat['dev'] != $stat['dev']
         || $currentStat['ino'] != $stat['ino']
         || fm_guard_existing($current, 'file') === false) {
@@ -341,7 +364,7 @@ function fm_guard_open_write($path, $mode = 'wb')
     clearstatcache(true, $target);
     $resolved = @realpath($target);
     $resolvedStat = $resolved === false ? false : @stat($resolved);
-    if (!is_array($stat) || $stat['dev'] != $config['device']
+    if (!is_array($stat) || !fm_guard_device_is_allowed($target, $stat['dev'])
         || !is_array($resolvedStat) || $resolvedStat['dev'] != $stat['dev']
         || $resolvedStat['ino'] != $stat['ino']
         || fm_guard_existing($resolved, 'file') === false) {

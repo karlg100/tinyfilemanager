@@ -338,10 +338,12 @@ afs_audit_protected(
 );
 afs_audit_protected(
     'mount-point traversal',
-    strpos($guard, "\$stat['dev'] != \$config['device']") !== false
+    strpos($guard, "if (\$device == \$config['device'])") !== false
+        && strpos($guard, 'FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS === true') !== false
+        && strpos($guard, "&& \$path !== \$config['root']") !== false
         && strpos($guard, "file_get_contents('/proc/self/mountinfo')") !== false
         && strpos($guard, 'fm_guard_crosses_nested_mount($real)') !== false,
-    'device changes and Linux nested/bind mountpoints are rejected'
+    'device changes are rejected by default and Linux nested/bind mountpoints remain rejected'
 );
 
 echo 'SUMMARY: ' . $auditProtected . ' protected, '

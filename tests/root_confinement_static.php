@@ -65,9 +65,12 @@ static_check(strpos($manager, 'move_uploaded_file($tmp_name, $fullPath)') === fa
 
 foreach (array(
     'realpath($absolute)',
-    "\$stat['dev'] != \$config['device']",
+    "if (\$device == \$config['device'])",
+    'FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS === true',
+    "&& \$path !== \$config['root']",
     "file_get_contents('/proc/self/mountinfo')",
     'fm_guard_crosses_nested_mount($real)',
+    'function fm_guard_device_is_allowed',
     'function fm_guard_open_read',
     'function fm_guard_open_write',
     'function fm_guard_archive_member',

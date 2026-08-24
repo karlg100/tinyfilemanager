@@ -45,6 +45,13 @@ file_put_contents($outside . '/krb5cc-delegated', 'delegated-cache-secret');
 try {
     $canonicalRoot = fm_guard_init($root);
     confinement_check($canonicalRoot === realpath($root), 'initializes one canonical file-manager root');
+    $rootDevice = stat($canonicalRoot)['dev'];
+    $simulatedVolumeDevice = $rootDevice === PHP_INT_MAX
+        ? $rootDevice - 1 : $rootDevice + 1;
+    confinement_check(
+        !fm_guard_device_is_allowed($canonicalRoot . '/volume/file',
+            $simulatedVolumeDevice),
+        'default policy rejects a simulated descendant st_dev transition');
     confinement_check(fm_guard_read($root . '/inside.txt') === 'inside', 'view/download read an in-root file');
 
     confinement_check(fm_guard_write($root . '/edited.txt', 'edited'), 'edit/create writes an in-root file');
