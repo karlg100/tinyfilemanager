@@ -149,7 +149,7 @@ The two mapped commits above are the historical replay layer and should remain u
 Commit `7ea1040cd3d7c6c2b12c5949c8f4604bf72a87b0` implements the separately reviewable production hardening:
 
 - fail-closed AFS availability, path, stat, command-execution, and parser handling;
-- removal of constructor request/shell side effects and exactly one explicit access lookup per listed item;
+- removal of constructor request/shell side effects; the later batching change collects listing paths and issues at most 128 access lookups per operation;
 - declared runtime state, all seven standard caller-access flags including `k`, and testable ACL parsing;
 - case-preserving round trips for standard `lrwidka` and AuriStor auxiliary `A-H` rights, so uppercase `A`/`D` cannot be confused with lowercase admin/delete;
 - negative ACL updates, correct `k` checkbox state, clearing ACL entries, and one `fs` invocation per positive or negative ACL set;
@@ -173,7 +173,7 @@ Commit `744c8eb07b024e6208f75ec6585da66f0ec8f0a9` converts single copy, move, an
 The no-live-mount regression layer is intentionally separate as well:
 
 - `tests/afs_regression.php` exercises ACL parsing and command construction, MaxACL fail-closed behavior, case-sensitive auxiliary rights, inherited ACLs, dotted/spaced principal keys, caller-access flags, path/device rejection, handle-time copy/read checks, directory and broken symlinks, unsupported special files, and helper inventory without touching `/afs`.
-- `tests/afs_static.php` checks default-off/config ordering, conditional `__DIR__` loading, retained upstream CSRF/URL-upload/exclusion controls, token-verified POST completion for single copy/move/duplicate, normal and negative ACL handling, all 15 rights, inherited-ACL gates, `k` mapping, batching, and one `getcalleraccess` call per listed item.
+- `tests/afs_static.php` checks default-off/config ordering, conditional `__DIR__` loading, retained upstream CSRF/URL-upload/exclusion controls, token-verified POST completion for single copy/move/duplicate, normal and negative ACL handling, all 15 rights, inherited-ACL gates, `k` mapping, and one batched caller-access call per listing.
 - `tests/afs_io_path_audit.php` inventories the generic endpoints. Until they are integrated, it records exact expected failures for save/backup, create, copy/duplicate, move/rename, delete, uploads, download/view/direct links, archives, symlink traversal, and mount-point traversal. An expected-failure audit must fail if the unsafe baseline changes unexpectedly; it must never silently convert an untested path into a pass.
 - Run PHP lint on `tinyfilemanager.php`, `afs.php`, and every PHP test, followed by all three focused suites and any available upstream checks.
 

@@ -926,6 +926,77 @@ class Afs
         return $acls;
     }
 
+    function getACLAccessBatch( $paths )
+    {
+        if ( !is_array( $paths ) || empty( $paths )) {
+            return array();
+        }
+
+        $access = array();
+        $safeToRequested = array();
+        foreach ( $paths as $path ) {
+            if ( !is_string( $path ) || $path === '' ) {
+                continue;
+            }
+            $access[$path] = '';
+            if ( strpos( $path, "\0" ) !== false
+              || strpos( $path, "\r" ) !== false
+              || strpos( $path, "\n" ) !== false ) {
+                continue;
+            }
+            $safePath = $this->pathSecurity( $path );
+            if ( !$safePath ) {
+                continue;
+            }
+            if ( !isset( $safeToRequested[$safePath] )) {
+                $safeToRequested[$safePath] = array();
+            }
+            $safeToRequested[$safePath][] = $path;
+        }
+
+        $batches = array();
+        $safePaths = array();
+        $payloadSize = 2;
+        foreach ( array_keys( $safeToRequested ) as $safePath ) {
+            $encodedSize = 2 + strlen( $safePath );
+            if ( !empty( $safePaths )
+              && ( count( $safePaths ) >= 128
+                || $payloadSize + $encodedSize > 262144 )) {
+                $batches[] = $safePaths;
+                $safePaths = array();
+                $payloadSize = 2;
+            }
+            $safePaths[] = $safePath;
+            $payloadSize += $encodedSize;
+        }
+        if ( !empty( $safePaths )) {
+            $batches[] = $safePaths;
+        }
+
+        foreach ( $batches as $safePaths ) {
+            $result = $this->runFs( array_merge(
+                array( 'getcalleraccess', '-path' ), $safePaths ));
+            if ( $result === false ) {
+                continue;
+            }
+
+            /* fs uses one aggregate exit status.  Preserve exact successful
+             * rows from mixed output; missing or malformed rows stay empty. */
+            foreach ( preg_split( '/\r?\n/', $result ) as $line ) {
+                if ( !preg_match(
+                        '/^Callers access to (.*) is ([lrwidkaA-H]{0,15})$/D',
+                        $line, $matches )
+                  || !isset( $safeToRequested[$matches[1]] )) {
+                    continue;
+                }
+                foreach ( $safeToRequested[$matches[1]] as $requestedPath ) {
+                    $access[$requestedPath] = $matches[2];
+                }
+            }
+        }
+        return $access;
+    }
+
     protected function runFs( $arguments )
     {
         if ( !is_array( $arguments ) || empty( $arguments )) {

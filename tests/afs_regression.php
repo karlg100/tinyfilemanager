@@ -7,6 +7,7 @@ final class AfsTestDouble extends Afs
 {
     public $commands = array();
     public $responses = array();
+    public $statuses = array();
 
     public function __construct()
     {
@@ -21,7 +22,8 @@ final class AfsTestDouble extends Afs
     protected function runFs($arguments)
     {
         $this->commands[] = $arguments;
-        $this->lastFsStatus = 0;
+        $this->lastFsStatus = empty($this->statuses)
+            ? 0 : array_shift($this->statuses);
         return empty($this->responses) ? '' : array_shift($this->responses);
     }
 }
@@ -263,6 +265,88 @@ check($afs->lookupPriv === 0 && $afs->readPriv === 0
     && $afs->deletePriv === 0 && $afs->lockPriv === 0
     && $afs->adminPriv === 0, 'failed parsing clears stale privilege flags');
 
+$batchCommandCount = count($afs->commands);
+$afs->responses[] = implode("\n", array(
+    'Callers access to /afs/one is rl',
+    'fs: /afs/a path: Permission denied',
+    'Callers access to /afs/name is odd is rlidwka',
+    'Callers access to /afs/trailing is ',
+    'Callers access to /afs/not-requested is A'
+));
+$afs->statuses[] = 1;
+$batchAccess = $afs->getACLAccessBatch(array(
+    '/afs/one', '/afs/a path', '/afs/name is odd', '/afs/trailing/',
+    "/afs/line\nbreak"
+));
+check($batchAccess['/afs/one'] === 'rl'
+    && $batchAccess['/afs/a path'] === ''
+    && $batchAccess['/afs/name is odd'] === 'rlidwka'
+    && $batchAccess['/afs/trailing/'] === ''
+    && $batchAccess["/afs/line\nbreak"] === '',
+    'batched getcalleraccess keeps successes and fails missing paths closed');
+check(count($afs->commands) === $batchCommandCount + 1
+    && $afs->commands[$batchCommandCount] === array(
+        'getcalleraccess', '-path', '/afs/one', '/afs/a path',
+        '/afs/name is odd', '/afs/trailing'),
+    'batched getcalleraccess uses one structured fs command and rejects line breaks');
+check($afs->getACLAccessBatch(array()) === array()
+    && count($afs->commands) === $batchCommandCount + 1,
+    'empty getcalleraccess batches do not launch fs');
+
+$chunkPaths = array();
+for ($chunkIndex = 0; $chunkIndex < 129; $chunkIndex++) {
+    $chunkPaths[] = '/afs/chunk-' . $chunkIndex;
+}
+$chunkCommandCount = count($afs->commands);
+$afs->responses[] = 'Callers access to /afs/chunk-0 is rl';
+$afs->responses[] = 'Callers access to /afs/chunk-128 is A';
+$chunkAccess = $afs->getACLAccessBatch($chunkPaths);
+check(count($afs->commands) === $chunkCommandCount + 2
+    && count($afs->commands[$chunkCommandCount]) === 130
+    && $afs->commands[$chunkCommandCount][129] === '/afs/chunk-127'
+    && $afs->commands[$chunkCommandCount + 1]
+        === array('getcalleraccess', '-path', '/afs/chunk-128'),
+    'getcalleraccess batches split at the 128-path boundary');
+check($chunkAccess['/afs/chunk-0'] === 'rl'
+    && $chunkAccess['/afs/chunk-1'] === ''
+    && $chunkAccess['/afs/chunk-128'] === 'A',
+    'chunked getcalleraccess maps exact successes and fails omissions closed');
+
+$largeBatchPaths = array();
+for ($largeIndex = 0; $largeIndex < 513; $largeIndex++) {
+    $largeBatchPaths[] = '/afs/large-' . $largeIndex;
+}
+$largeCommandCount = count($afs->commands);
+for ($largeChunk = 0; $largeChunk < 5; $largeChunk++) {
+    $largeFirst = $largeChunk * 128;
+    $afs->responses[] = 'Callers access to /afs/large-'
+        . $largeFirst . ' is l';
+}
+$largeAccess = $afs->getACLAccessBatch($largeBatchPaths);
+check(count($afs->commands) === $largeCommandCount + 5
+    && count($afs->commands[$largeCommandCount + 3]) === 130
+    && $afs->commands[$largeCommandCount + 4]
+        === array('getcalleraccess', '-path', '/afs/large-512'),
+    'getcalleraccess retains a bounded fifth batch at the 512/513 boundary');
+check($largeAccess['/afs/large-0'] === 'l'
+    && $largeAccess['/afs/large-512'] === 'l',
+    'the 512/513 boundary preserves results from the first and fifth batches');
+
+$payloadPaths = array();
+for ($payloadIndex = 0; $payloadIndex < 64; $payloadIndex++) {
+    $payloadPrefix = '/afs/payload-' . $payloadIndex . '-';
+    $payloadPaths[] = $payloadPrefix
+        . str_repeat('x', 4095 - strlen($payloadPrefix));
+}
+$payloadCommandCount = count($afs->commands);
+$afs->responses[] = '';
+$afs->responses[] = '';
+$afs->getACLAccessBatch($payloadPaths);
+check(count($afs->commands) === $payloadCommandCount + 2
+    && count($afs->commands[$payloadCommandCount]) === 65
+    && count($afs->commands[$payloadCommandCount + 1]) === 3,
+    'getcalleraccess batches split before the 262144-byte payload ceiling');
+
 $afs->responses[] = '';
 check($afs->changeAcl('user;touch /tmp/not-run', 'rl', '/afs/a path') === true,
     'normal ACL changes accept shell-sensitive names as data');
@@ -416,7 +500,8 @@ try {
         'JavaScript escaping covers quote, slash, CR, and LF');
 
     $requiredMethods = array('copy', 'copy_dirs', 'deleteFiles', 'removeFolder',
-        'readfile', 'changeAcl', 'readAcl', 'getACLAccess', 'makePathAFSlocal');
+        'readfile', 'changeAcl', 'readAcl', 'getACLAccess',
+        'getACLAccessBatch', 'makePathAFSlocal');
     $reflection = new ReflectionClass('Afs');
     foreach ($requiredMethods as $method) {
         check($reflection->hasMethod($method), "retains Afs::$method");

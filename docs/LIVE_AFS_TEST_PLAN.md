@@ -86,7 +86,7 @@ Before using the browser, run PHP lint and the no-live-mount suites against the 
 Create a deterministic fixture containing:
 
 - empty, small text, binary, zero-byte, large, Unicode-name, whitespace-name, dot, and allowed/disallowed-extension files;
-- empty and nested directories, a deep tree, and a directory with enough entries to expose per-item command latency;
+- empty and nested directories, a deep tree, and directories below and above the 128-path caller-access batch boundary;
 - same-volume and cross-volume destinations;
 - a zip and tar archive with ordinary nested content;
 - separately generated traversal archives containing `../`, absolute names, nested symlink entries, and names that collide with existing files;
@@ -108,7 +108,7 @@ For both a directory and a regular file path, while recording whether the implem
 6. Test principal names containing cell qualifiers and characters that exercise HTML/form encoding. Confirm that the displayed principal, submitted key, and `fs` argument are identical and that no markup executes.
 7. Remove the token/PAG and repeat read and mutation attempts. Confirm a clear failure without partial ACL changes.
 8. Compare the UI permission text with `fs getcalleraccess` under all four identities and across ordinary directories, child mount points, and the cross-volume root.
-9. Measure listing time and count `fs getcalleraccess` executions for small and large directories. The expected optimized behavior is no constructor lookup and one explicit lookup per displayed item; record any remaining O(N) usability limit.
+9. Measure listing time and count `fs getcalleraccess` executions for small and large directories, including 128 and 129 eligible entries. The implementation must issue one operation per batch of at most 128 paths, not one process per row, so the expected count is `ceil(eligible paths / 128)`. Verify that mixed success/failure output preserves only exact successful rows and leaves failed rows empty.
 10. Capture raw OpenAFS and AuriStor CLI output separately if both implementations are supported. Parser success on one is not evidence for the other.
 11. On AuriStor, create a file with an inherited ACL. Verify that the UI identifies it as inherited, disables submission, and that a crafted POST is rejected without converting it to a file-specific ACL. If explicit conversion is tested separately, record the exact command and use the client-supported ACL-removal operation to restore inheritance.
 12. Populate multiple positive and negative ACEs and verify one `fs` invocation per set. Force the second set to fail after the first succeeds; record the partial-update behavior and restore the exact baseline before continuing.

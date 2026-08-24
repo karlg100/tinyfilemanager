@@ -2359,6 +2359,26 @@ fm_show_message();
 $num_files = count($files);
 $num_folders = count($folders);
 $all_files_size = 0;
+$afsAclAccess = array();
+if ($afsSupport && !FM_IS_WIN && !$hide_Cols) {
+    $aclPaths = array();
+    foreach ($folders as $item) {
+        $itemPath = fm_guard_existing($path . '/' . $item, 'dir');
+        if ($itemPath !== false) {
+            $aclPaths[] = $itemPath;
+        }
+    }
+    foreach ($files as $item) {
+        $itemPath = fm_guard_existing($path . '/' . $item, 'file');
+        if ($itemPath !== false) {
+            $aclPaths[] = $itemPath;
+        }
+    }
+    if (!empty($aclPaths)) {
+        $afs = new Afs($aclPaths[0]);
+        $afsAclAccess = $afs->getACLAccessBatch($aclPaths);
+    }
+}
 $metadata_column_count = (!FM_IS_WIN && !$hide_Cols) ? ($afsSupport ? 1 : 2) : 0;
 $table_column_count = 4 + $metadata_column_count + (FM_READONLY ? 0 : 1);
 $content_column_count = $table_column_count - (FM_READONLY ? 0 : 1);
@@ -2422,8 +2442,8 @@ $content_column_count = $table_column_count - (FM_READONLY ? 0 : 1);
                 $owner = array('name' => '?');
                 $group = array('name' => '?');
                 if ($afsSupport && !FM_IS_WIN && !$hide_Cols) {
-                    $afs = new Afs($item_path);
-                    $perms = $afs->getACLAccess($item_path);
+                    $perms = isset($afsAclAccess[$item_path])
+                        ? $afsAclAccess[$item_path] : '';
                 } elseif (!$afsSupport && function_exists('posix_getpwuid') && function_exists('posix_getgrgid')) {
                     try {
                         $owner_id = fileowner($item_path);
@@ -2501,8 +2521,8 @@ $content_column_count = $table_column_count - (FM_READONLY ? 0 : 1);
                 $owner = array('name' => '?');
                 $group = array('name' => '?');
                 if ($afsSupport && !FM_IS_WIN && !$hide_Cols) {
-                    $afs = new Afs($item_path);
-                    $perms = $afs->getACLAccess($item_path);
+                    $perms = isset($afsAclAccess[$item_path])
+                        ? $afsAclAccess[$item_path] : '';
                 } elseif (!$afsSupport && function_exists('posix_getpwuid') && function_exists('posix_getgrgid')) {
                     try {
                         $owner_id = fileowner($item_path);

@@ -245,8 +245,8 @@ foreach (preg_split('/\r?\n/', $aclUi) as $line) {
 }
 afs_test_ok($lockRows === 2, 'both positive and negative ACL tables contain one lock row');
 
-// Constructing an Afs object used to shell out once, after which each listing
-// row called getcalleraccess again. Keep exactly one subprocess per item.
+// Constructing an Afs object must not query caller access. Directory listings
+// collect eligible paths first and dispatch one batch.
 $constructor = afs_test_section($afs, 'public function __construct', 'public function getType', 'Afs constructor');
 afs_test_ok(
     substr_count($constructor, 'getACLAccess(') === 0,
@@ -273,9 +273,12 @@ afs_test_contains($runFs, '$this->lastFsStatus = 126;',
 
 $folderListing = afs_test_section($manager, '$ii = 3399;', '$ik = 8002;', 'folder-listing loop');
 $fileListing = afs_test_section($manager, '$ik = 8002;', 'if (empty($folders) && empty($files))', 'file-listing loop');
-afs_test_ok(substr_count($folderListing, '->getACLAccess(') === 1, 'each folder row has one explicit getcalleraccess call');
-afs_test_ok(substr_count($fileListing, '->getACLAccess(') === 1, 'each file row has one explicit getcalleraccess call');
-afs_test_ok(substr_count($manager, '->getACLAccess(') === 2, 'Tiny File Manager has only the two per-row getcalleraccess call sites');
+afs_test_ok(substr_count($folderListing, '->getACLAccess(') === 0,
+    'folder rows consume prefetched caller access without subprocesses');
+afs_test_ok(substr_count($fileListing, '->getACLAccess(') === 0,
+    'file rows consume prefetched caller access without subprocesses');
+afs_test_ok(substr_count($manager, '->getACLAccessBatch(') === 1,
+    'Tiny File Manager has one batched caller-access call site');
 
 echo "SUMMARY: " . $afsTestPasses . " passed, " . count($afsTestFailures) . " failed\n";
 if (!empty($afsTestFailures)) {
