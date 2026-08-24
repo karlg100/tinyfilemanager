@@ -64,6 +64,8 @@ static_check(strpos($manager, 'readfile(') === false, 'download does not reopen 
 static_check(strpos($manager, 'move_uploaded_file($tmp_name, $fullPath)') === false, 'upload does not use an unchecked final destination');
 static_check(strpos($guard, 'FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS') === false,
     'generic deployment opt-in for device transitions is absent');
+static_check(strpos($guard, 'ctype_') === false,
+    'root guard has no optional ctype extension dependency');
 
 foreach (array(
     'realpath($absolute)',

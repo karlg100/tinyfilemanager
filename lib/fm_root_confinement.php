@@ -144,8 +144,9 @@ function fm_guard_parse_mountinfo($contents)
         $separator = array_search('-', $fields, true);
         if ($separator === false || $separator < 6
             || count($fields) < $separator + 4
-            || !ctype_digit($fields[0]) || !ctype_digit($fields[1])
-            || !preg_match('/^[0-9]+:[0-9]+$/', $fields[2])) {
+            || !preg_match('/\A[0-9]+\z/', $fields[0])
+            || !preg_match('/\A[0-9]+\z/', $fields[1])
+            || !preg_match('/\A[0-9]+:[0-9]+\z/', $fields[2])) {
             return false;
         }
 
