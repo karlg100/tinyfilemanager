@@ -170,6 +170,7 @@ $ext_language = array(
 
 // OpenAFS / AuriStor support. Enable this in config.php on an AFS-backed host.
 $afsSupport = false;
+$enable_afs_acl_operations = true;
 
 // These pilot gates are deliberately fixed in public source. They cannot be
 // relaxed by a deployment configuration file.
@@ -1393,7 +1394,8 @@ if (!$afsSupport && isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !
 }
 
 // Change AFS ACLs (not for Windows)
-if ($afsSupport && isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !FM_IS_WIN) {
+if ($afsSupport && $enable_afs_acl_operations
+    && isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !FM_IS_WIN) {
     if (!verifyToken($_POST['token'])) {
         fm_set_msg(lng('Invalid Token.'), 'error');
         die('Invalid Token.');
@@ -2234,7 +2236,8 @@ if (!$afsSupport && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
 }
 
 // Edit AFS ACLs (not for Windows)
-if ($afsSupport && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
+if ($afsSupport && $enable_afs_acl_operations
+    && isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
     $file = fm_clean_path($_GET['chmod']);
     $file = str_replace('/', '', $file);
     $file_path = $file == '' ? false : fm_guard_existing($path . '/' . $file);
@@ -2360,7 +2363,7 @@ $num_files = count($files);
 $num_folders = count($folders);
 $all_files_size = 0;
 $afsAclAccess = array();
-if ($afsSupport && !FM_IS_WIN && !$hide_Cols) {
+if ($afsSupport && $enable_afs_acl_operations && !FM_IS_WIN && !$hide_Cols) {
     $aclPaths = array();
     foreach ($folders as $item) {
         $itemPath = fm_guard_existing($path . '/' . $item, 'dir');
@@ -2484,7 +2487,7 @@ $content_column_count = $table_column_count - (FM_READONLY ? 0 : 1);
                     <td data-order="a-<?php echo $date_sorting; ?>"><?php echo $modif ?></td>
                     <?php if (!FM_IS_WIN && !$hide_Cols): ?>
                         <td>
-                            <?php if (!FM_READONLY): ?><a title="Change Permissions" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
+                            <?php if (!FM_READONLY && (!$afsSupport || $enable_afs_acl_operations)): ?><a title="Change Permissions" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
                         </td>
                         <?php if (!$afsSupport): ?><td>
                             <?php echo $owner['name'] . ':' . $group['name'] ?>
@@ -2563,7 +2566,7 @@ $content_column_count = $table_column_count - (FM_READONLY ? 0 : 1);
                         </span></td>
                     <td data-order="b-<?php echo $date_sorting; ?>"><?php echo $modif ?></td>
                     <?php if (!FM_IS_WIN && !$hide_Cols): ?>
-                        <td><?php if (!FM_READONLY): ?><a title="<?php echo 'Change Permissions' ?>" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
+                        <td><?php if (!FM_READONLY && (!$afsSupport || $enable_afs_acl_operations)): ?><a title="<?php echo 'Change Permissions' ?>" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
                         </td>
                         <?php if (!$afsSupport): ?><td><?php echo fm_enc($owner['name'] . ':' . $group['name']) ?></td><?php endif; ?>
                     <?php endif; ?>

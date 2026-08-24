@@ -28,6 +28,11 @@ pilot_check(strpos($manager, "define('FM_ENABLE_ARCHIVE_OPERATIONS', false);") !
     'archive routes are fixed off before deployment configuration');
 pilot_check(strpos($manager, "define('FM_ALLOW_INLINE_PREVIEW', false);") !== false,
     'active preview is fixed off before deployment configuration');
+pilot_check(strpos($manager, '$enable_afs_acl_operations = true;') !== false,
+    'native AFS ACL operations retain an explicit deployment override');
+pilot_check(substr_count($manager,
+    '$afsSupport && $enable_afs_acl_operations') >= 3,
+    'AFS ACL display, editor, and mutation all require the deployment gate');
 
 foreach (array('uploadurl', 'upload_from_url', 'curl_exec(', 'copy($url', 'set_time_limit(') as $forbidden) {
     pilot_check(strpos($manager, $forbidden) === false,

@@ -279,6 +279,19 @@ afs_test_ok(substr_count($fileListing, '->getACLAccess(') === 0,
     'file rows consume prefetched caller access without subprocesses');
 afs_test_ok(substr_count($manager, '->getACLAccessBatch(') === 1,
     'Tiny File Manager has one batched caller-access call site');
+afs_test_contains($manager, '$enable_afs_acl_operations = true;',
+    'native AFS deployments retain ACL operations unless config disables them');
+afs_test_contains($manager,
+    '$afsSupport && $enable_afs_acl_operations && !FM_IS_WIN && !$hide_Cols',
+    'disabled ACL operations do not invoke the batch');
+afs_test_contains($manager,
+    '$afsSupport && $enable_afs_acl_operations' . "\n"
+        . "    && isset(\$_POST['chmod']",
+    'AFS ACL mutation route requires the deployment feature gate');
+afs_test_contains($manager,
+    '$afsSupport && $enable_afs_acl_operations' . "\n"
+        . "    && isset(\$_GET['chmod']",
+    'AFS ACL editor route requires the deployment feature gate');
 
 echo "SUMMARY: " . $afsTestPasses . " passed, " . count($afsTestFailures) . " failed\n";
 if (!empty($afsTestFailures)) {
