@@ -62,13 +62,17 @@ static_check(strpos(implode("\n", $directLines), '&amp;raw=') !== false, 'file d
 static_check(strpos($manager, 'extractTo(') === false, 'built-in unconfined archive extraction is absent');
 static_check(strpos($manager, 'readfile(') === false, 'download does not reopen a checked path by name');
 static_check(strpos($manager, 'move_uploaded_file($tmp_name, $fullPath)') === false, 'upload does not use an unchecked final destination');
+static_check(strpos($guard, 'FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS') === false,
+    'generic deployment opt-in for device transitions is absent');
 
 foreach (array(
     'realpath($absolute)',
     "if (\$device == \$config['device'])",
-    'FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS === true',
+    'fm_guard_root_uses_allowlisted_afs($real, $mountinfo)',
+    "return \$filesystem === 'auristorfs' || \$filesystem === 'afs';",
     "&& \$path !== \$config['root']",
     "file_get_contents('/proc/self/mountinfo')",
+    "array_search('-', \$fields, true)",
     'fm_guard_crosses_nested_mount($real)',
     'function fm_guard_device_is_allowed',
     'function fm_guard_open_read',

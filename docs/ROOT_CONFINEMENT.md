@@ -9,8 +9,8 @@ The guard:
   outside it;
 - permits a symbolic link only when its resolved target remains inside the
   root;
-- requires existing objects and opened handles to remain on the root device by
-  default;
+- requires existing objects and opened handles to remain on the root device,
+  except for verified AFS volume-device transitions described below;
 - rejects nested Linux mountpoints, including same-device bind mounts reported
   by `/proc/self/mountinfo`;
 - rechecks the device and inode after opening read/write handles and delays
@@ -26,23 +26,24 @@ escaping link may be unlinked, renamed, or moved as a directory entry, but it
 is never followed for data access. Nested mounts are intentionally unavailable
 through the file manager.
 
-Some AuriStor Linux clients report a different `st_dev` after crossing an AFS
-volume mount point even though no nested Linux VFS mount exists. An AFS
-deployment that has independently verified this provider behavior may opt in
-before the guard is loaded (normally from `config.php`):
+Linux AuriStor and OpenAFS clients can report a different `st_dev` after
+crossing an AFS volume mount point even though no nested Linux VFS mount exists.
+The guard recognizes this automatically only when the canonical configured root
+is exactly `/afs` or below it and the deepest, visible mountinfo record covering
+that root has the exact filesystem type `auristorfs` or `afs`. Linux OpenAFS
+registers its filesystem type as `afs`; aliases, case variants, and other
+filesystem types are not accepted. There is no deployment opt-in.
 
-```php
-define('FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS', true);
-```
+Only descendant device transitions receive this treatment; the configured root
+must retain its initial device. Canonical-path containment, escaping-symlink
+rejection, opened-handle identity checks, and `/proc/self/mountinfo` nested-mount
+rejection remain enforced, including for nested mounts of an allowlisted AFS
+type.
 
-The option is strictly off by default. It permits only descendant device
-transitions; the configured root must retain its initial device. Canonical-path
-containment, escaping-symlink rejection, opened-handle identity checks, and
-`/proc/self/mountinfo` nested-mount rejection remain enforced.
-
-Linux deployments must expose a readable `/proc/self/mountinfo` to PHP. The
-guard fails closed when that interface is unavailable because it could not
-otherwise distinguish a same-device bind mount from an ordinary directory.
+Linux deployments must expose a complete, readable `/proc/self/mountinfo` to
+PHP. Empty or malformed input, invalid path escaping, or a missing covering
+record fails closed. This is required both to identify the AFS implementation
+and to distinguish same-device bind mounts from ordinary directories.
 
 ## Tests
 

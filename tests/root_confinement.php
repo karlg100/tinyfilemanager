@@ -102,7 +102,8 @@ try {
 
     mkdir($root . '/nested-mount');
     $GLOBALS['FM_ROOT_GUARD_MOUNTINFO'] =
-        '101 1 0:42 / ' . $root . '/nested-mount rw - tmpfs tmpfs rw' . "\n";
+        "100 0 0:1 / / rw - overlay overlay rw\n"
+        . '101 100 0:42 / ' . $root . '/nested-mount rw - tmpfs tmpfs rw' . "\n";
     confinement_check(fm_guard_existing($root . '/nested-mount', 'dir') === false, 'list/read reject a nested mountpoint');
     confinement_check(fm_guard_create_path($root . '/nested-mount/new.txt') === false, 'writes reject a nested mountpoint');
     unset($GLOBALS['FM_ROOT_GUARD_MOUNTINFO']);

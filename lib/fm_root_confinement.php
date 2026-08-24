@@ -6,8 +6,9 @@
  * Existing paths may use symbolic links only when their resolved target remains
  * below that root.  Paths crossing onto a nested filesystem are rejected.  On
  * Linux, mountinfo is also consulted so same-device bind mounts are rejected.
- *
- * This is deliberately independent of any particular network filesystem.
+ * AFS volume device transitions are accepted only for a canonical root at or
+ * below /afs whose covering Linux filesystem is verified as AuriStor or
+ * OpenAFS by that same mountinfo view.
  */
 
 function fm_guard_init($root)
@@ -19,12 +20,12 @@ function fm_guard_init($root)
     }
 
     $real = fm_guard_normalize_absolute($real);
+    $mountinfo = fm_guard_mountinfo_records();
     $GLOBALS['FM_ROOT_GUARD'] = array(
         'root' => $real,
         'device' => $stat['dev'],
         'allow_afs_device_transitions' =>
-            defined('FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS')
-            && FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS === true,
+            fm_guard_root_uses_allowlisted_afs($real, $mountinfo),
     );
     return $real;
 }
@@ -96,9 +97,9 @@ function fm_guard_config()
 }
 
 /**
- * AuriStor volume traversal can report a different st_dev below /afs without
- * creating a Linux VFS mountpoint. Deployments may explicitly accept that
- * provider behavior while retaining canonical-root and mountinfo checks.
+ * AFS volume traversal can report a different st_dev below /afs without
+ * creating a Linux VFS mountpoint. This exception is derived only from a
+ * verified, allowlisted AFS mount covering the configured root.
  */
 function fm_guard_device_is_allowed($path, $device)
 {
@@ -117,34 +118,54 @@ function fm_guard_device_is_allowed($path, $device)
 
 function fm_guard_mount_unescape($path)
 {
-    return preg_replace_callback('/\\\\([0-7]{3})/', function ($match) {
-        return chr(octdec($match[1]));
-    }, $path);
+    if (!is_string($path) || preg_match('/\\\\(?!011|012|040|134)/', $path)) {
+        return false;
+    }
+    return strtr($path, array(
+        '\\011' => "\t",
+        '\\012' => "\n",
+        '\\040' => ' ',
+        '\\134' => '\\',
+    ));
 }
 
 function fm_guard_parse_mountinfo($contents)
 {
     $mounts = array();
-    if (!is_string($contents)) {
-        return $mounts;
+    $hasNamespaceRoot = false;
+    if (!is_string($contents) || trim($contents) === '') {
+        return false;
     }
     foreach (preg_split('/\r?\n/', $contents) as $line) {
         if ($line === '') {
             continue;
         }
-        $fields = explode(' ', $line);
-        if (count($fields) < 6) {
-            continue;
+        $fields = preg_split('/ +/', trim($line));
+        $separator = array_search('-', $fields, true);
+        if ($separator === false || $separator < 6
+            || count($fields) < $separator + 4
+            || !ctype_digit($fields[0]) || !ctype_digit($fields[1])
+            || !preg_match('/^[0-9]+:[0-9]+$/', $fields[2])) {
+            return false;
         }
+
+        $mountRoot = fm_guard_normalize_absolute(
+            fm_guard_mount_unescape($fields[3]));
         $mount = fm_guard_normalize_absolute(fm_guard_mount_unescape($fields[4]));
-        if ($mount !== false) {
-            $mounts[$mount] = true;
+        $filesystem = $fields[$separator + 1];
+        if ($mountRoot === false || $mount === false || $filesystem === '') {
+            return false;
         }
+        $mounts[] = array(
+            'mountpoint' => $mount,
+            'filesystem' => $filesystem,
+        );
+        $hasNamespaceRoot = $hasNamespaceRoot || $mount === '/';
     }
-    return array_keys($mounts);
+    return $hasNamespaceRoot ? $mounts : false;
 }
 
-function fm_guard_mountpoints()
+function fm_guard_mountinfo_records()
 {
     static $cache = null;
     if (array_key_exists('FM_ROOT_GUARD_MOUNTINFO', $GLOBALS)) {
@@ -154,11 +175,70 @@ function fm_guard_mountpoints()
         $contents = @file_get_contents('/proc/self/mountinfo');
         if ($contents === false && stripos(PHP_OS, 'Linux') === 0) {
             $cache = false;
+        } elseif ($contents === false) {
+            $cache = array();
         } else {
             $cache = fm_guard_parse_mountinfo($contents);
         }
     }
     return $cache;
+}
+
+function fm_guard_mountpoints()
+{
+    $records = fm_guard_mountinfo_records();
+    if ($records === false) {
+        return false;
+    }
+    $mounts = array();
+    foreach ($records as $record) {
+        if (!is_array($record) || !isset($record['mountpoint'])
+            || !is_string($record['mountpoint'])) {
+            return false;
+        }
+        $mounts[$record['mountpoint']] = true;
+    }
+    return array_keys($mounts);
+}
+
+/** Return the filesystem type of the deepest, latest mount covering path. */
+function fm_guard_covering_filesystem($path, $records)
+{
+    $path = fm_guard_normalize_absolute($path);
+    if ($path === false || !is_array($records)) {
+        return false;
+    }
+
+    $bestLength = -1;
+    $filesystem = false;
+    foreach ($records as $record) {
+        if (!is_array($record) || !isset($record['mountpoint'], $record['filesystem'])
+            || !is_string($record['mountpoint']) || !is_string($record['filesystem'])
+            || $record['filesystem'] === '') {
+            return false;
+        }
+        $mount = fm_guard_normalize_absolute($record['mountpoint']);
+        if ($mount === false || !fm_guard_path_is_within($path, $mount)) {
+            continue;
+        }
+        $length = strlen($mount);
+        if ($length >= $bestLength) {
+            $bestLength = $length;
+            $filesystem = $record['filesystem'];
+        }
+    }
+
+    return $bestLength >= 0 ? $filesystem : false;
+}
+
+function fm_guard_root_uses_allowlisted_afs($root, $records)
+{
+    $root = fm_guard_normalize_absolute($root);
+    if ($root === false || !fm_guard_path_is_within($root, '/afs')) {
+        return false;
+    }
+    $filesystem = fm_guard_covering_filesystem($root, $records);
+    return $filesystem === 'auristorfs' || $filesystem === 'afs';
 }
 
 function fm_guard_crosses_nested_mount($path)

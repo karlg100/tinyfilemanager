@@ -339,11 +339,13 @@ afs_audit_protected(
 afs_audit_protected(
     'mount-point traversal',
     strpos($guard, "if (\$device == \$config['device'])") !== false
-        && strpos($guard, 'FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS === true') !== false
+        && strpos($guard, 'FM_ROOT_GUARD_ALLOW_AFS_DEVICE_TRANSITIONS') === false
+        && strpos($guard, 'fm_guard_root_uses_allowlisted_afs($real, $mountinfo)') !== false
+        && strpos($guard, "return \$filesystem === 'auristorfs' || \$filesystem === 'afs';") !== false
         && strpos($guard, "&& \$path !== \$config['root']") !== false
         && strpos($guard, "file_get_contents('/proc/self/mountinfo')") !== false
         && strpos($guard, 'fm_guard_crosses_nested_mount($real)') !== false,
-    'device changes are rejected by default and Linux nested/bind mountpoints remain rejected'
+    'device changes require a mount-proven /afs root and Linux nested/bind mountpoints remain rejected'
 );
 
 echo 'SUMMARY: ' . $auditProtected . ' protected, '
