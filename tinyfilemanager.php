@@ -121,6 +121,11 @@ $max_upload_size_bytes = 5000000000; // size 5,000,000,000 bytes (~5GB)
 // eg. decrease to 1MB if nginx reports problem 413 entity too large
 $upload_chunk_size_bytes = 2000000; // chunk size 2,000,000 bytes (~2MB)
 
+// Enforce a deployment-pinned same-origin POST and session CSRF token for
+// every state-changing route. Production deployments should override both.
+$require_post_for_mutations = false;
+$required_mutation_origin = '';
+
 // Possible rules are 'OFF', 'AND' or 'OR'
 // OFF => Don't check connection IP, defaults to OFF
 // AND => Connection must be on the whitelist, and not on the blacklist
@@ -178,6 +183,8 @@ $config_file = __DIR__ . '/config.php';
 if (is_readable($config_file)) {
     @include($config_file);
 }
+
+require_once __DIR__ . '/lib/fm_mutation_guard.php';
 
 $online_viewer = false;
 $use_highlightjs = false;
@@ -294,6 +301,35 @@ if (empty($_SESSION['token'])) {
     }
 }
 
+// Decode only the existing JSON editor-save schema before the central
+// mutation gate. Other JSON objects must not become form/action parameters.
+$input = file_get_contents('php://input');
+$contentType = isset($_SERVER['CONTENT_TYPE']) && is_string($_SERVER['CONTENT_TYPE'])
+    ? $_SERVER['CONTENT_TYPE'] : '';
+if ($input !== '' && stripos($contentType, 'application/json') === 0) {
+    $decodedPost = json_decode($input, true);
+    if (is_array($decodedPost)
+        && isset($decodedPost['ajax'], $decodedPost['type'],
+            $decodedPost['token'], $decodedPost['content'])
+        && $decodedPost['ajax'] === true
+        && $decodedPost['type'] === 'save'
+        && is_string($decodedPost['token'])
+        && is_string($decodedPost['content'])) {
+        $_POST = $decodedPost;
+    }
+}
+unset($contentType, $decodedPost, $input);
+
+fm_enforce_mutation_request(
+    $_SERVER,
+    $_GET,
+    $_POST,
+    $_FILES,
+    $_SESSION,
+    $require_post_for_mutations,
+    $required_mutation_origin
+);
+
 if (empty($auth_users)) {
     $use_auth = false;
 }
@@ -314,7 +350,15 @@ defined('FM_ROOT_URL') || define('FM_ROOT_URL', ($is_https ? 'https' : 'http') .
 defined('FM_SELF_URL') || define('FM_SELF_URL', ($is_https ? 'https' : 'http') . '://' . $http_host . $_SERVER['PHP_SELF']);
 
 // logout
-if (isset($_GET['logout'])) {
+if (isset($_POST['logout'])) {
+    if (!isset($_POST['token']) || !is_string($_POST['token'])
+        || !verifyToken($_POST['token'])) {
+        http_response_code(403);
+        header('Cache-Control: no-store, max-age=0');
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo "The logout request was rejected.\n";
+        exit;
+    }
     unset($_SESSION[FM_SESSION_ID]['logged']);
     unset($_SESSION['token']);
     fm_redirect(FM_SELF_URL);
@@ -488,10 +532,6 @@ $p = isset($_GET['p']) ? $_GET['p'] : (isset($_POST['p']) ? $_POST['p'] : '');
 
 // clean path
 $p = fm_clean_path($p);
-
-// for ajax request - save
-$input = file_get_contents('php://input');
-$_POST = (strpos($input, 'ajax') != FALSE && strpos($input, 'save') != FALSE) ? json_decode($input, true) : $_POST;
 
 // instead globals vars
 define('FM_PATH', $p);
@@ -2021,6 +2061,26 @@ if (isset($_GET['edit']) && !FM_READONLY) {
         $FM_PATH = FM_PATH;
         fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
     }
+
+    // Retain the plain-form fallback with the same explicit CSRF check as the
+    // JSON editor route. The central gate has already checked method and
+    // origin when the deployment policy is enabled.
+    if (isset($_POST['savedata'])) {
+        if (!isset($_POST['token']) || !is_string($_POST['token'])
+            || !verifyToken($_POST['token'])) {
+            http_response_code(403);
+            header('Cache-Control: no-store, max-age=0');
+            header('Content-Type: text/plain; charset=UTF-8');
+            echo "The editor request was rejected.\n";
+            exit;
+        }
+        $writedata = $_POST['savedata'];
+        if (is_string($writedata) && fm_guard_write($file_path, $writedata)) {
+            fm_set_msg(lng('File Saved Successfully'));
+        } else {
+            fm_set_msg(lng('Unable to save file'), 'error');
+        }
+    }
     $editFile = ' : <i><b>' . $file . '</b></i>';
     header('X-XSS-Protection:0');
     fm_show_header(); // HEADER
@@ -2030,16 +2090,6 @@ if (isset($_GET['edit']) && !FM_READONLY) {
 
     // The pilot uses only the ordinary same-page textarea editor.
     $isNormalEditor = true;
-
-    // Save File
-    if (isset($_POST['savedata'])) {
-        $writedata = $_POST['savedata'];
-        if (is_string($writedata) && fm_guard_write($file_path, $writedata)) {
-            fm_set_msg(lng('File Saved Successfully'));
-        } else {
-            fm_set_msg(lng('Unable to save file'), 'error');
-        }
-    }
 
     $ext = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
     $mime_type = fm_get_mime_type($file_path);
@@ -4105,7 +4155,10 @@ function fm_show_nav_path($path)
                                     <a title="<?php echo lng('Settings') ?>" class="dropdown-item nav-link" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;settings=1"><i class="fa fa-cog" aria-hidden="true"></i> <?php echo lng('Settings') ?></a>
                                 <?php endif ?>
                                 <a title="<?php echo lng('Help') ?>" class="dropdown-item nav-link" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;help=2"><i class="fa fa-exclamation-circle" aria-hidden="true"></i> <?php echo lng('Help') ?></a>
-                                <a title="<?php echo lng('Logout') ?>" class="dropdown-item nav-link" href="?logout=1"><i class="fa fa-sign-out" aria-hidden="true"></i> <?php echo lng('Logout') ?></a>
+                                <form method="post" action="<?php echo fm_enc(FM_SELF_URL) ?>" class="m-0">
+                                    <input type="hidden" name="token" value="<?php echo fm_enc($_SESSION['token']) ?>">
+                                    <button type="submit" name="logout" value="1" title="<?php echo lng('Logout') ?>" class="dropdown-item nav-link"><i class="fa fa-sign-out" aria-hidden="true"></i> <?php echo lng('Logout') ?></button>
+                                </form>
                             </div>
                         </li>
                     <?php else: ?>
@@ -5188,44 +5241,31 @@ function fm_show_header_login()
             function edit_save(e, t) {
                 var n = "ace" == t ? editor.getSession().getValue() : document.getElementById("normal-editor").value;
                 if (typeof n !== 'undefined' && n !== null) {
-                    if (true) {
-                        var data = {
-                            ajax: true,
-                            content: n,
-                            type: 'save',
-                            token: window.csrf
-                        };
+                    var data = {
+                        ajax: true,
+                        content: n,
+                        type: 'save',
+                        token: window.csrf
+                    };
 
-                        $.ajax({
-                            type: "POST",
-                            url: window.location,
-                            data: JSON.stringify(data),
-                            contentType: "application/json; charset=utf-8",
-                            success: function(mes) {
-                                toast("<?php echo lng("Saved Successfully"); ?>");
-                                window.onbeforeunload = function() {
-                                    return
-                                }
-                            },
-                            failure: function(mes) {
-                                toast("<?php echo lng("Error: try again"); ?>");
-                            },
-                            error: function(mes) {
-                                toast(`<p style="background-color:red">${mes.responseText}</p>`);
+                    $.ajax({
+                        type: "POST",
+                        url: window.location,
+                        data: JSON.stringify(data),
+                        contentType: "application/json; charset=utf-8",
+                        success: function(mes) {
+                            toast("<?php echo lng("Saved Successfully"); ?>");
+                            window.onbeforeunload = function() {
+                                return
                             }
-                        });
-                    } else {
-                        var a = document.createElement("form");
-                        a.setAttribute("method", "POST"), a.setAttribute("action", "");
-                        var o = document.createElement("textarea");
-                        o.setAttribute("type", "textarea"), o.setAttribute("name", "savedata");
-                        let cx = document.createElement("input");
-                        cx.setAttribute("type", "hidden");
-                        cx.setAttribute("name", "token");
-                        cx.setAttribute("value", window.csrf);
-                        var c = document.createTextNode(n);
-                        o.appendChild(c), a.appendChild(o), a.appendChild(cx), document.body.appendChild(a), a.submit()
-                    }
+                        },
+                        failure: function(mes) {
+                            toast("<?php echo lng("Error: try again"); ?>");
+                        },
+                        error: function(mes) {
+                            toast(`<p style="background-color:red">${mes.responseText}</p>`);
+                        }
+                    });
                 }
             }
 

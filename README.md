@@ -33,7 +33,7 @@ Tinyfilemanager is highly documented on the [wiki pages](https://github.com/pras
 
 Download ZIP with latest version from master branch.
 
-Copy `tinyfilemanager.php`, `lib`, and `assets` to your webspace. The root-confinement library and hash-pinned local browser assets are required and must remain next to the script. Deployments serving assets from another same-origin path may set `$asset_base_url` in `config.php`.
+Copy `tinyfilemanager.php`, `lib`, and `assets` to your webspace. The root-confinement and mutation-request libraries and hash-pinned local browser assets are required and must remain next to the script. Deployments serving assets from another same-origin path may set `$asset_base_url` in `config.php`.
 You can also change the file name from "tinyfilemanager.php" to something else, you know what i meant for.
 
 The compatibility-pilot profile intentionally disables server-side URL upload,
@@ -48,6 +48,20 @@ Default username/password: **admin/admin@123** and **user/12345**.
 To enable/disable authentication set `$use_auth` to true or false.
 
 :information_source: Add your own configuration file [config.php](https://tinyfilemanager.github.io/config-sample.txt) in the same folder to use as additional configuration file.
+
+Reverse-proxy or SSO deployments can require every POST and every recognized
+mutation attempt to carry the current session CSRF token and one exact HTTPS
+origin:
+
+```php
+$require_post_for_mutations = true;
+$required_mutation_origin = 'https://files.example.org';
+```
+
+The web server or CGI launcher must preserve the browser's `Origin` header as
+`HTTP_ORIGIN`. Missing, duplicated, or non-exact origins and missing or stale
+tokens are rejected before route dispatch. The policy defaults off for
+backward compatibility; individual legacy route checks remain in place.
 
 :information_source: To work offline without CDN resources, use [offline](https://github.com/prasathmani/tinyfilemanager/tree/offline) branch
 

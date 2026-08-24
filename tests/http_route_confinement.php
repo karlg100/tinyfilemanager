@@ -8,6 +8,7 @@ if (!function_exists('proc_open') || !function_exists('stream_socket_server')) {
 
 $checks = 0;
 $cookie = '';
+$mutationOrigin = '';
 
 function http_check($condition, $message)
 {
@@ -46,12 +47,17 @@ function http_copy_tree($source, $dest)
     }
 }
 
-function http_request($url, $method = 'GET', $body = null, $contentType = null)
+function http_request($url, $method = 'GET', $body = null, $contentType = null,
+    $originMode = 'default')
 {
-    global $cookie;
+    global $cookie, $mutationOrigin;
     $headers = array('Connection: close');
     if ($cookie !== '') $headers[] = 'Cookie: ' . $cookie;
     if ($contentType !== null) $headers[] = 'Content-Type: ' . $contentType;
+    if ($method === 'POST' && $originMode !== false) {
+        $origin = $originMode === 'default' ? $mutationOrigin : $originMode;
+        if ($origin !== '') $headers[] = 'Origin: ' . $origin;
+    }
     $options = array(
         'method' => $method,
         'ignore_errors' => true,
@@ -73,6 +79,63 @@ function http_request($url, $method = 'GET', $body = null, $contentType = null)
         }
     }
     return array($status, $response, $received);
+}
+
+function http_tree_digest($root)
+{
+    $rows = array();
+    $walk = function ($path, $relative) use (&$walk, &$rows) {
+        $status = lstat($path);
+        if ($status === false) {
+            $rows[] = $relative . "\tmissing";
+            return;
+        }
+        if (is_link($path)) {
+            $rows[] = $relative . "\tlink\t" . readlink($path);
+            return;
+        }
+        if (is_file($path)) {
+            $rows[] = $relative . "\tfile\t" . hash_file('sha256', $path)
+                . "\t" . ($status['mode'] & 07777);
+            return;
+        }
+        if (is_dir($path)) {
+            $rows[] = $relative . "\tdir\t" . ($status['mode'] & 07777);
+            $names = scandir($path);
+            foreach ($names as $name) {
+                if ($name !== '.' && $name !== '..') {
+                    $walk($path . '/' . $name,
+                        $relative === '' ? $name : $relative . '/' . $name);
+                }
+            }
+            return;
+        }
+        $rows[] = $relative . "\tother\t" . ($status['mode'] & 07777);
+    };
+    $walk($root, '');
+    sort($rows, SORT_STRING);
+    return hash('sha256', implode("\n", $rows));
+}
+
+function http_mutation_snapshot($data, $outside, $app)
+{
+    return hash('sha256', http_tree_digest($data) . "\n"
+        . http_tree_digest($outside) . "\n"
+        . http_tree_digest($app));
+}
+
+function http_rejected_without_delta($label, $expectedStatus, $url, $method,
+    $body, $contentType, $originMode, $data, $outside, $app)
+{
+    $before = http_mutation_snapshot($data, $outside, $app);
+    $response = http_request(
+        $url, $method, $body, $contentType, $originMode);
+    clearstatcache();
+    $after = http_mutation_snapshot($data, $outside, $app);
+    http_check($response[0] === $expectedStatus,
+        "$label returns HTTP $expectedStatus");
+    http_check($before === $after,
+        "$label leaves every synthetic filesystem object unchanged");
 }
 
 function http_header_is($headers, $name, $value)
@@ -144,8 +207,11 @@ try {
         . '$root_path = ' . var_export($data, true) . ';' . "\n"
         . '$root_url = "";' . "\n"
         . '$online_viewer = false;' . "\n"
-        . '$afsSupport = false;' . "\n";
+        . '$afsSupport = false;' . "\n"
+        . '$require_post_for_mutations = true;' . "\n"
+        . '$required_mutation_origin = "https://afs-auth.example.test:8444";' . "\n";
     file_put_contents($app . '/config.php', $config);
+    $mutationOrigin = 'https://afs-auth.example.test:8444';
 
     $socket = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
     if ($socket === false) throw new RuntimeException('unable to reserve a test port');
@@ -177,6 +243,107 @@ try {
     http_check(strpos($page[1], 'delegated-cache-link') === false, 'list route hides an escaping delegated-cache symlink');
     http_check(strpos($page[1], 'raw=inside.txt') !== false, 'direct file link returns through guarded raw streaming');
     http_check(strpos($page[1], 'edit=inside.txt') !== false, 'list route exposes the ordinary editor');
+
+    $createBody = form_body(array(
+        'newfilename' => 'must-not-exist.txt',
+        'newfile' => 'file',
+        'token' => $token,
+    ));
+    http_rejected_without_delta(
+        'create without Origin', 403, $base . '?p=', 'POST',
+        $createBody, 'application/x-www-form-urlencoded', false,
+        $data, $outside, $app);
+    http_rejected_without_delta(
+        'create with wrong Origin', 403, $base . '?p=', 'POST',
+        $createBody, 'application/x-www-form-urlencoded',
+        'https://wrong.example.test:8444', $data, $outside, $app);
+    http_rejected_without_delta(
+        'create with comma-coalesced Origin', 403, $base . '?p=', 'POST',
+        $createBody, 'application/x-www-form-urlencoded',
+        $mutationOrigin . ', https://wrong.example.test:8444',
+        $data, $outside, $app);
+    http_rejected_without_delta(
+        'create without CSRF', 403, $base . '?p=', 'POST',
+        form_body(array(
+            'newfilename' => 'must-not-exist.txt',
+            'newfile' => 'file',
+        )),
+        'application/x-www-form-urlencoded', 'default',
+        $data, $outside, $app);
+    http_rejected_without_delta(
+        'create with wrong CSRF', 403, $base . '?p=', 'POST',
+        form_body(array(
+            'newfilename' => 'must-not-exist.txt',
+            'newfile' => 'file',
+            'token' => str_repeat('f', 64),
+        )),
+        'application/x-www-form-urlencoded', 'default',
+        $data, $outside, $app);
+    http_rejected_without_delta(
+        'JSON cannot invoke a form create route', 403,
+        $base . '?p=', 'POST',
+        json_encode(array(
+            'newfilename' => 'must-not-exist.txt',
+            'newfile' => 'file',
+            'token' => $token,
+        )),
+        'application/json', 'default', $data, $outside, $app);
+    http_rejected_without_delta(
+        'legacy GET delete attempt', 405,
+        $base . '?p=&del=inside.txt', 'GET', null, null, false,
+        $data, $outside, $app);
+
+    foreach (array(
+        'missing token' => array(),
+        'wrong token' => array('token' => str_repeat('f', 64)),
+    ) as $label => $tokenFields) {
+        http_rejected_without_delta(
+            "savedata $label", 403,
+            $base . '?p=&edit=inside.txt', 'POST',
+            form_body(array_merge(array('savedata' => 'forbidden-write'),
+                $tokenFields)),
+            'application/x-www-form-urlencoded', 'default',
+            $data, $outside, $app);
+    }
+    http_rejected_without_delta(
+        'savedata without Origin', 403,
+        $base . '?p=&edit=inside.txt', 'POST',
+        form_body(array(
+            'savedata' => 'forbidden-write',
+            'token' => $token,
+        )),
+        'application/x-www-form-urlencoded', false,
+        $data, $outside, $app);
+    http_rejected_without_delta(
+        'savedata with wrong Origin', 403,
+        $base . '?p=&edit=inside.txt', 'POST',
+        form_body(array(
+            'savedata' => 'forbidden-write',
+            'token' => $token,
+        )),
+        'application/x-www-form-urlencoded',
+        'https://wrong.example.test:8444', $data, $outside, $app);
+
+    $savedata = http_request(
+        $base . '?p=&edit=inside.txt', 'POST',
+        form_body(array(
+            'savedata' => 'plain-form-route-data',
+            'token' => $token,
+        )),
+        'application/x-www-form-urlencoded');
+    http_check($savedata[0] === 200
+        && file_get_contents($data . '/inside.txt') === 'plain-form-route-data',
+        'savedata accepts the exact configured Origin and session CSRF token');
+    $savedataRestore = http_request(
+        $base . '?p=&edit=inside.txt', 'POST',
+        form_body(array(
+            'savedata' => 'inside-route-data',
+            'token' => $token,
+        )),
+        'application/x-www-form-urlencoded');
+    http_check($savedataRestore[0] === 200
+        && file_get_contents($data . '/inside.txt') === 'inside-route-data',
+        'savedata restoration succeeds through the same central gate');
 
     $editPage = http_request($base . '?p=&edit=inside.txt');
     http_check($editPage[0] === 200

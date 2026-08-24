@@ -56,14 +56,19 @@ Run the dependency-free behavior, static-route, and HTTP-route tests:
 php tests/root_confinement.php
 php tests/root_confinement_afs_multidevice.php
 php tests/root_confinement_static.php
+php tests/mutation_request_guard.php
 php -d phar.readonly=0 tests/http_route_confinement.php
 php tests/afs_io_path_audit.php
 ```
 
-The HTTP test starts a loopback-only PHP development server over synthetic
+The mutation-request test exercises every state-changing route classification
+against correct and incorrect method, Origin, and session-CSRF inputs. The
+HTTP test starts a loopback-only PHP development server over synthetic
 temporary files. It exercises list, view, download, direct streaming, create,
 upload, edit, copy, move, rename, delete, TAR creation, and TAR extraction,
 including a link to a synthetic delegated credential cache outside the root.
+It also proves rejected mutation requests leave the complete synthetic data,
+escape, and application manifests unchanged.
 
 ZIP behavior additionally requires the PHP `zip` extension. The same member
 validation and guarded extraction path is used for ZIP and TAR.

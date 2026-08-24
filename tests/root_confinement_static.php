@@ -4,7 +4,8 @@
 $root = dirname(__DIR__);
 $manager = file_get_contents($root . '/tinyfilemanager.php');
 $guard = file_get_contents($root . '/lib/fm_root_confinement.php');
-if ($manager === false || $guard === false) {
+$mutationGuard = file_get_contents($root . '/lib/fm_mutation_guard.php');
+if ($manager === false || $guard === false || $mutationGuard === false) {
     fwrite(STDERR, "FAIL: unable to load confinement sources\n");
     exit(2);
 }
@@ -28,6 +29,44 @@ function route_section($source, $start, $end)
     $to = $from === false ? false : strpos($source, $end, $from + strlen($start));
     return $from !== false && $to !== false ? substr($source, $from, $to - $from) : '';
 }
+
+$configInclude = strpos($manager, '@include($config_file);');
+$mutationRequire = strpos($manager,
+    "require_once __DIR__ . '/lib/fm_mutation_guard.php';");
+$mutationCall = strpos($manager, 'fm_enforce_mutation_request(');
+$actionStart = strpos($manager, '/*************************** ACTIONS ***************************/');
+static_check(strpos($manager, '$require_post_for_mutations = false;') !== false
+    && strpos($manager, '$required_mutation_origin = \'\';') !== false,
+    'mutation enforcement defaults remain backward-compatible');
+static_check($configInclude !== false && $mutationRequire !== false
+    && $configInclude < $mutationRequire,
+    'deployment configuration is loaded before the immutable mutation guard');
+static_check($mutationCall !== false && $actionStart !== false
+    && $mutationCall < $actionStart,
+    'the central mutation guard executes before every file-operation dispatcher');
+static_check(strpos($manager, "\$decodedPost['ajax'] === true") !== false
+    && strpos($manager, "\$decodedPost['type'] === 'save'") !== false
+    && strpos($manager, "is_string(\$decodedPost['token'])") !== false
+    && strpos($manager, "is_string(\$decodedPost['content'])") !== false,
+    'JSON decoding is restricted to the existing editor-save schema');
+static_check(strpos($mutationGuard,
+    '($route === null && $method !== \'POST\')') !== false,
+    'configured policy protects every POST even if a future route is unclassified');
+
+$editorSection = route_section(
+    $manager, '// file editor', '// chmod (not for Windows or AFS)');
+$savedataCheck = strpos($editorSection,
+    "!isset(\$_POST['token']) || !is_string(\$_POST['token'])");
+$savedataVerify = strpos($editorSection, "!verifyToken(\$_POST['token'])");
+$savedataWrite = strpos($editorSection, 'fm_guard_write($file_path, $writedata)');
+static_check($savedataCheck !== false && $savedataVerify !== false
+    && $savedataWrite !== false
+    && $savedataCheck < $savedataWrite
+    && $savedataVerify < $savedataWrite,
+    'plain savedata checks a string session CSRF token before writing');
+static_check(strpos($manager, "isset(\$_GET['logout'])") === false
+    && strpos($manager, "isset(\$_POST['logout'])") !== false,
+    'logout no longer mutates session state from GET');
 
 $routes = array(
     'edit/save' => array('// save editor file', '// backup files', array('fm_guard_existing(', 'fm_guard_write(')),
