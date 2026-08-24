@@ -149,11 +149,14 @@ function fm_guard_parse_mountinfo($contents)
             return false;
         }
 
-        $mountRoot = fm_guard_normalize_absolute(
-            fm_guard_mount_unescape($fields[3]));
+        // mountinfo field 4 is the root within the mounted filesystem. Linux
+        // permits opaque values here (for example nsfs net:[...]); only field
+        // 5 is the absolute mountpoint used for path confinement.
+        $mountRoot = fm_guard_mount_unescape($fields[3]);
         $mount = fm_guard_normalize_absolute(fm_guard_mount_unescape($fields[4]));
         $filesystem = $fields[$separator + 1];
-        if ($mountRoot === false || $mount === false || $filesystem === '') {
+        if ($mountRoot === false || $mountRoot === ''
+            || $mount === false || $filesystem === '') {
             return false;
         }
         $mounts[] = array(

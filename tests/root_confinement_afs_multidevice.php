@@ -55,6 +55,8 @@ try {
         . "11 10 8:2 / /afs rw - xfs /dev/root rw\n";
     $outsideAfsMountinfo = $namespaceRoot
         . "11 10 0:2 / /srv/openafs rw - auristorfs none rw\n";
+    $rhelNsfsMountinfo = $namespaceRoot
+        . "12 10 0:4 net:[4026532693] /run/netns/host rw - nsfs nsfs rw\n";
 
     $auristorRecords = fm_guard_parse_mountinfo($auristorMountinfo);
     $openafsRecords = fm_guard_parse_mountinfo($openafsMountinfo);
@@ -64,6 +66,12 @@ try {
 
     afs_multidevice_check(is_array($auristorRecords),
         'strict mountinfo parser accepts a complete AuriStor mount table');
+    $rhelNsfsRecords = fm_guard_parse_mountinfo($rhelNsfsMountinfo);
+    afs_multidevice_check(is_array($rhelNsfsRecords)
+        && count($rhelNsfsRecords) === 2
+        && $rhelNsfsRecords[1]['mountpoint'] === '/run/netns/host'
+        && $rhelNsfsRecords[1]['filesystem'] === 'nsfs',
+        'parser accepts a RHEL 9 nsfs record with opaque net namespace root');
     afs_multidevice_check(
         fm_guard_root_uses_allowlisted_afs('/afs', $auristorRecords)
             && fm_guard_root_uses_allowlisted_afs('/afs/example/path', $auristorRecords),
@@ -98,6 +106,14 @@ try {
         fm_guard_parse_mountinfo($namespaceRoot
             . "11 10 0:2 / /afs\\999 rw - auristorfs none rw\n") === false,
         'an invalid mountinfo path escape fails closed');
+    afs_multidevice_check(
+        fm_guard_parse_mountinfo($namespaceRoot
+            . "11 10 0:2 net:\\999 /afs rw - auristorfs none rw\n") === false,
+        'an invalid opaque mount-root escape fails closed');
+    afs_multidevice_check(
+        fm_guard_parse_mountinfo($namespaceRoot
+            . "11 10 0:2  /afs rw - auristorfs none rw\n") === false,
+        'an empty mount-root field fails closed');
     afs_multidevice_check(
         fm_guard_parse_mountinfo('') === false,
         'empty mountinfo fails closed');

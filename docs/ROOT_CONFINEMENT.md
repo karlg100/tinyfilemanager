@@ -43,7 +43,10 @@ type.
 Linux deployments must expose a complete, readable `/proc/self/mountinfo` to
 PHP. Empty or malformed input, invalid path escaping, or a missing covering
 record fails closed. This is required both to identify the AFS implementation
-and to distinguish same-device bind mounts from ordinary directories.
+and to distinguish same-device bind mounts from ordinary directories. The
+filesystem-root field must be nonempty but may be an opaque kernel identifier
+(for example an `nsfs` `net:[...]` value); the mountpoint field must resolve to
+an absolute path.
 
 ## Tests
 
