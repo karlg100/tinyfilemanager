@@ -1013,9 +1013,9 @@ class Afs
         return $now + 6000000000;
     }
 
-    private static function brokerSetDeadline( $stream, $deadline )
+    private static function brokerWait( $stream, $deadline, $write )
     {
-        if ( !function_exists( 'hrtime' )) {
+        if ( !function_exists( 'hrtime' ) || !is_bool( $write )) {
             return false;
         }
         $now = hrtime( true );
@@ -1031,20 +1031,22 @@ class Afs
         if ( $seconds === 0 && $microseconds === 0 ) {
             $microseconds = 1;
         }
-        return @stream_set_timeout( $stream, $seconds, $microseconds );
+        $readStreams = $write ? null : array( $stream );
+        $writeStreams = $write ? array( $stream ) : null;
+        $exceptStreams = null;
+        return @stream_select( $readStreams, $writeStreams, $exceptStreams,
+            $seconds, $microseconds ) === 1;
     }
 
     private static function brokerReadExact( $stream, $length, $deadline )
     {
         $data = '';
         while ( strlen( $data ) < $length ) {
-            if ( !self::brokerSetDeadline( $stream, $deadline )) {
+            if ( !self::brokerWait( $stream, $deadline, false )) {
                 return false;
             }
             $part = fread( $stream, $length - strlen( $data ));
-            $metadata = stream_get_meta_data( $stream );
-            if ( $part === false || $part === ''
-              || !empty( $metadata['timed_out'] )) {
+            if ( $part === false || $part === '' ) {
                 return false;
             }
             $data .= $part;
@@ -1091,19 +1093,19 @@ class Afs
             return false;
         }
         if ( self::$aclBrokerStream === null ) {
-            $fd = getenv( 'AURISTOR_AFS_ACL_BROKER_FD' );
-            if ( !is_string( $fd ) || !preg_match( '/^[0-9]{1,2}$/D', $fd )
-              || (int)$fd < 3 || (int)$fd > 63 ) {
+            if ( !function_exists( 'fm_open_afs_acl_broker_stream' )) {
                 self::$aclBrokerUnavailable = true;
                 return false;
             }
-            self::$aclBrokerStream = @fopen( 'php://fd/' . $fd, 'r+b' );
-            if ( self::$aclBrokerStream === false ) {
+            self::$aclBrokerStream = @fm_open_afs_acl_broker_stream();
+            if ( !is_resource( self::$aclBrokerStream )
+              || !@stream_set_blocking( self::$aclBrokerStream, false )
+              || @stream_set_read_buffer(
+                    self::$aclBrokerStream, 0 ) !== 0 ) {
                 self::$aclBrokerStream = null;
                 self::$aclBrokerUnavailable = true;
                 return false;
             }
-            stream_set_blocking( self::$aclBrokerStream, true );
         }
 
         $request = pack( 'a4CCCCN', 'AACL', 1, $operation, $flags, 0,
@@ -1115,16 +1117,14 @@ class Afs
         }
         $written = 0;
         while ( $written < strlen( $request )) {
-            if ( !self::brokerSetDeadline(
-                    self::$aclBrokerStream, $deadline )) {
+            if ( !self::brokerWait(
+                    self::$aclBrokerStream, $deadline, true )) {
                 self::$aclBrokerUnavailable = true;
                 return false;
             }
             $count = @fwrite( self::$aclBrokerStream,
                 substr( $request, $written ));
-            $metadata = stream_get_meta_data( self::$aclBrokerStream );
-            if ( $count === false || $count === 0
-              || !empty( $metadata['timed_out'] )) {
+            if ( $count === false || $count === 0 ) {
                 self::$aclBrokerUnavailable = true;
                 return false;
             }

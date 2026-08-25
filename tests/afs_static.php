@@ -274,7 +274,7 @@ afs_test_contains($runFs, "getenv( 'AURISTOR_AFS_ACL_BROKER_DIALECT' )",
     'typed container ACL operations require an explicit provider dialect');
 afs_test_contains($runFs, "!== 'auristor'",
     'the typed broker contract is explicitly AuriStor-only');
-$brokerClient = afs_test_section($afs, 'private static function brokerSetDeadline', 'private function runBrokerFs', 'typed ACL broker client');
+$brokerClient = afs_test_section($afs, 'private static function brokerWait', 'private function runBrokerFs', 'typed ACL broker client');
 afs_test_contains($afs, "function_exists( 'hrtime' )",
     'broker frames fail closed without a monotonic PHP clock');
 afs_test_contains($brokerClient, '$now = hrtime( true );',
@@ -283,6 +283,24 @@ afs_test_ok(strpos($brokerClient, 'microtime(') === false,
     'broker frame deadlines never use the adjustable wall clock');
 afs_test_contains($brokerClient, 'self::$aclBrokerRequests >= 64',
     'broker operations retain a bounded budget above the 512-row boundary');
+afs_test_contains($brokerClient,
+    "function_exists( 'fm_open_afs_acl_broker_stream' )",
+    'CGI broker transport requires the deployment-provided stream factory');
+afs_test_contains($brokerClient,
+    'self::$aclBrokerStream = @fm_open_afs_acl_broker_stream();',
+    'CGI broker transport calls only the reviewed stream factory');
+afs_test_contains($brokerClient,
+    '@stream_set_blocking( self::$aclBrokerStream, false )',
+    'CGI broker transport is nonblocking');
+afs_test_contains($brokerClient,
+    '@stream_set_read_buffer(',
+    'CGI broker transport disables userspace read prefetch');
+afs_test_contains($brokerClient, '@stream_select(',
+    'CGI broker I/O uses deadline-bounded descriptor readiness');
+afs_test_ok(strpos($brokerClient, 'stream_set_timeout') === false,
+    'CGI broker transport does not rely on socket-only stream timeouts');
+afs_test_ok(strpos($brokerClient, 'php://fd/') === false,
+    'CGI broker transport does not use the CLI-only php fd wrapper');
 afs_test_contains($runFs, "function_exists( 'exec' )",
     'native AFS command fallback checks whether exec is available');
 afs_test_contains($runFs, '$this->lastFsStatus = 126;',

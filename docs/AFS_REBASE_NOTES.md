@@ -190,7 +190,12 @@ when that monotonic clock is unavailable. The broker client exposes only
 caller-access, ACL-read, and bounded ACL-change operations; it cannot carry an
 executable, shell, environment, or raw output. If the trusted launcher does
 not advertise the broker, native installations retain the escaped CLI
-fallback. PHP 7.4 and 8.3 both pass 84 regression assertions, 151 static
+fallback. Under PHP-CGI, the deployment-provided stream factory maps one
+fixed, nonexistent application path to a duplicate of the request-private
+broker socket. The client does not use the CLI-only `php://fd` wrapper or
+socket-only timeout metadata: PHP read prefetch is disabled, and nonblocking
+reads and writes are gated by monotonic `stream_select()` deadlines. PHP 7.4
+and 8.3 both pass 84 regression assertions, 160 static
 assertions, and 59 pilot feature-gate assertions for this branch. Live PAG
 inheritance and AuriStor `/proc/self/fd/N` behavior remain deployment gates,
 not automated-test claims. The typed broker also requires the explicit
