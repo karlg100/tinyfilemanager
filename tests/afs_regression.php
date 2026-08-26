@@ -379,6 +379,20 @@ try {
     $inside = $tempRoot . '/inside';
     check(mkdir($inside, 0700), 'creates an in-device path');
     $device = stat($inside)['dev'];
+
+    $inheritanceFile = $tempRoot . '/specific-acl-file';
+    check(file_put_contents($inheritanceFile, 'acl') === 3,
+        'creates a file for inheritance restoration tests');
+    $inheritanceAfs = new AfsTestDouble();
+    $inheritanceAfs->responses[] = '';
+    check($inheritanceAfs->restoreAclInheritance($inheritanceFile) === true,
+        'restoreAclInheritance accepts an existing regular file');
+    check($inheritanceAfs->commands[0]
+        === array('removeacl', $inheritanceFile),
+        'restoreAclInheritance uses a structured fs removeacl invocation');
+    check($inheritanceAfs->restoreAclInheritance($inside) === false
+        && count($inheritanceAfs->commands) === 1,
+        'restoreAclInheritance rejects directories before invoking fs');
     $fsAfs = new AfsFilesystemDouble();
     $fsAfs->configureFilesystem($device, $originalCwd);
 
@@ -501,7 +515,8 @@ try {
 
     $requiredMethods = array('copy', 'copy_dirs', 'deleteFiles', 'removeFolder',
         'readfile', 'changeAcl', 'readAcl', 'getACLAccess',
-        'getACLAccessBatch', 'makePathAFSlocal');
+        'getACLAccessBatch', 'restoreAclInheritance',
+        'makePathAFSlocal');
     $reflection = new ReflectionClass('Afs');
     foreach ($requiredMethods as $method) {
         check($reflection->hasMethod($method), "retains Afs::$method");

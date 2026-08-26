@@ -153,13 +153,15 @@ Commit `7ea1040cd3d7c6c2b12c5949c8f4604bf72a87b0` implements the separately revi
 - declared runtime state, all seven standard caller-access flags including `k`, and testable ACL parsing;
 - case-preserving round trips for standard `lrwidka` and AuriStor auxiliary `A-H` rights, so uppercase `A`/`D` cannot be confused with lowercase admin/delete;
 - negative ACL updates, correct `k` checkbox state, clearing ACL entries, and one `fs` invocation per positive or negative ACL set;
-- inherited AuriStor ACL detection with read-only UI and server-side mutation rejection, avoiding accidental materialization of an inherited file ACL;
+- inherited AuriStor ACL detection with an explicit make-specific control,
+  server-side revalidation of that intent, and a file-only restore-inheritance
+  operation backed by `fs removeacl`;
 - strict ACL-output validation that rejects unknown rights, duplicate rights, missing headers, and malformed command output;
 - safe missing-`filedrawers_rename` behavior, complete copy writes including flush/close failures, partial-destination cleanup, recursive-copy ancestry rejection, and correct symlink destination names;
 - a test-overridable AFS root and command runner while retaining the production defaults `/afs` and `/usr/bin/fs`;
 - explicit retention of the narrower ACL display/edit claim because generic data-plane routing was not changed.
 
-The case and inheritance handling follows the AuriStor [`fs listacl`](https://www.auristor.com/documentation/man/linux/1/fs_listacl.html) and [`fs setacl`](https://www.auristor.com/documentation/man/linux/1/fs_setacl.html) contracts: auxiliary rights are uppercase `A-H`, inherited file ACLs are marked in list output, and setting an ACL on such a file creates a file-specific ACL.
+The case and inheritance handling follows the AuriStor [`fs listacl`](https://www.auristor.com/documentation/man/linux/1/fs_listacl.html), [`fs setacl`](https://www.auristor.com/documentation/man/linux/1/fs_setacl.html), and [`fs removeacl`](https://www.auristor.com/documentation/man/linux/1/fs_removeacl.html) contracts: auxiliary rights are uppercase `A-H`, inherited file ACLs are marked in list output, setting an ACL on such a file creates a file-specific ACL, and removing that file-specific ACL restores inheritance.
 
 Independent review produced two additional, separately reviewable fixes after the original hardening commit:
 
@@ -187,7 +189,8 @@ does not silently lose its fifth batch while the total remains bounded. Each
 request and response frame uses one absolute six-second monotonic `hrtime()`
 deadline rather than resetting the timeout after partial I/O, and fails closed
 when that monotonic clock is unavailable. The broker client exposes only
-caller-access, ACL-read, and bounded ACL-change operations; it cannot carry an
+caller-access, ACL-read, bounded ACL-change, and file-only
+inheritance-removal operations; it cannot carry an
 executable, shell, environment, or raw output. If the trusted launcher does
 not advertise the broker, native installations retain the escaped CLI
 fallback. Under PHP-CGI, the deployment-provided stream factory maps one

@@ -781,6 +781,28 @@ class Afs
         return true;
     }
 
+    // Remove a file-specific ACL so that the file inherits its parent ACL.
+    function restoreAclInheritance( $path='' )
+    {
+        $path = ( $path ) ? $path : $this->path;
+        $path = $this->pathSecurity( $path );
+        if ( !$path || !is_file( $path )) {
+            $this->errorMsg =
+                'Warning: Invalid ACL inheritance request.';
+            return false;
+        }
+
+        $result = $this->runFs( array( 'removeacl', $path ));
+        if ( $result === false || $this->lastFsStatus !== 0
+          || preg_match( '/(^|\n)fs:/', $result )) {
+            $this->errorMsg =
+                'Warning: Unable to restore inherited permissions.';
+            return false;
+        }
+
+        return true;
+    }
+
     // Return an array of ACL rights for the current path
     function readAcl( $path='' )
     {
@@ -1315,6 +1337,19 @@ class Afs
                     . chr( strlen( $rights )) . $rights;
             }
             $response = self::brokerRequest( 3, $negative ? 1 : 0, $payload );
+            if ( $response === false || $response['status'] !== 0
+              || $response['payload'] !== '' ) {
+                $this->lastFsStatus = 1;
+                return false;
+            }
+            $this->lastFsStatus = 0;
+            return '';
+        }
+
+        if ( $arguments[0] === 'removeacl' && count( $arguments ) === 2 ) {
+            $path = self::brokerPackString( $arguments[1] );
+            $response = $path === false ? false
+                : self::brokerRequest( 5, 0, $path );
             if ( $response === false || $response['status'] !== 0
               || $response['payload'] !== '' ) {
                 $this->lastFsStatus = 1;

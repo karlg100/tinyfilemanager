@@ -1423,8 +1423,32 @@ if ($afsSupport && $enable_afs_acl_operations
         $FM_PATH = FM_PATH;
         fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
     }
-    if (!empty($currentAcl['inherited'])) {
-        fm_set_msg(lng('Inherited AuriStor ACLs are read-only here'), 'error');
+    $restoreInheritance = isset($_POST['restore_inheritance'])
+        && is_string($_POST['restore_inheritance'])
+        && $_POST['restore_inheritance'] === '1';
+    $breakInheritance = isset($_POST['break_inheritance'])
+        && is_string($_POST['break_inheritance'])
+        && $_POST['break_inheritance'] === '1';
+    $aclIsFile = is_file($aclPath);
+
+    if ($restoreInheritance) {
+        $restored = $aclIsFile && empty($currentAcl['inherited'])
+            && $afs->restoreAclInheritance($aclPath);
+        fm_set_msg(lng($restored
+            ? 'Inherited permissions restored'
+            : 'Inherited permissions not restored'),
+            $restored ? 'ok' : 'error');
+        $FM_PATH = FM_PATH;
+        fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
+    }
+    if (!empty($currentAcl['inherited'])
+        && (!$aclIsFile || !$breakInheritance)) {
+        fm_set_msg(lng('Make permissions specific before changing them'), 'error');
+        $FM_PATH = FM_PATH;
+        fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
+    }
+    if (empty($currentAcl['inherited']) && $breakInheritance) {
+        fm_set_msg(lng('Permissions not changed'), 'error');
         $FM_PATH = FM_PATH;
         fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
     }
@@ -2256,7 +2280,8 @@ if ($afsSupport && $enable_afs_acl_operations
     $normal_acl = $acl_readable && isset($mode['normal']) ? $mode['normal'] : array();
     $negative_acl = $acl_readable && isset($mode['negative']) ? $mode['negative'] : array();
     $acl_inherited = $acl_readable && !empty($mode['inherited']);
-    $acl_readonly = !$acl_readable || $acl_inherited;
+    $acl_is_file = is_file($file_path);
+    $acl_readonly = !$acl_readable;
 ?>
     <div class="path">
         <div class="card mb-2" data-bs-theme="<?php echo FM_THEME; ?>">
@@ -2269,13 +2294,14 @@ if ($afsSupport && $enable_afs_acl_operations
                 <?php if (!$acl_readable): ?>
                     <div class="alert alert-danger"><?php echo lng('Unable to read the current AFS ACL') ?></div>
                 <?php elseif ($acl_inherited): ?>
-                    <div class="alert alert-warning"><?php echo lng('Inherited AuriStor ACLs are read-only here') ?></div>
+                    <div class="alert alert-warning"><?php echo lng('These permissions are inherited from the parent') ?></div>
                 <?php endif; ?>
                 <form action="" method="post">
                     <input type="hidden" name="p" value="<?php echo fm_enc(FM_PATH) ?>">
                     <input type="hidden" name="chmod" value="<?php echo fm_enc($file) ?>">
                     <input type="hidden" name="token" value="<?php echo fm_enc($_SESSION['token']); ?>">
-                    <fieldset<?php echo $acl_readonly ? ' disabled' : ''; ?>>
+                    <?php if ($acl_inherited): ?><input type="hidden" id="acl-break-inheritance" name="break_inheritance" value="0"><?php endif; ?>
+                    <fieldset id="acl-permission-fields"<?php echo ($acl_readonly || $acl_inherited) ? ' disabled' : ''; ?>>
                     <table class="table compact-table" data-bs-theme="<?php echo FM_THEME; ?>">
                         <tr>
                             <td><b><?php echo lng('User') ?>/<?php echo lng('Group') ?></b></td>
@@ -2341,7 +2367,13 @@ if ($afsSupport && $enable_afs_acl_operations
                     </fieldset>
                     <p>
                         <b><a href="?p=<?php echo urlencode(FM_PATH) ?>" class="btn btn-outline-primary"><i class="fa fa-times-circle"></i> <?php echo lng('Cancel') ?></a></b>&nbsp;
-                        <?php if (!$acl_readonly): ?><button type="submit" class="btn btn-success"><i class="fa fa-check-circle"></i> <?php echo lng('Change') ?></button><?php endif; ?>
+                        <?php if ($acl_inherited && $acl_is_file): ?>
+                            <button type="button" id="acl-make-specific" class="btn btn-warning" onclick="document.getElementById('acl-permission-fields').disabled=false;document.getElementById('acl-break-inheritance').value='1';document.getElementById('acl-save-specific').hidden=false;this.hidden=true;"><i class="fa fa-unlock"></i> <?php echo lng('Make permissions specific') ?></button>
+                            <button type="submit" id="acl-save-specific" class="btn btn-success" hidden><i class="fa fa-check-circle"></i> <?php echo lng('Change') ?></button>
+                        <?php elseif (!$acl_readonly): ?>
+                            <button type="submit" class="btn btn-success"><i class="fa fa-check-circle"></i> <?php echo lng('Change') ?></button>
+                            <?php if ($acl_is_file): ?><button type="submit" name="restore_inheritance" value="1" class="btn btn-outline-warning" onclick="return confirm('<?php echo lng('Restore inherited permissions?') ?>');"><i class="fa fa-level-up"></i> <?php echo lng('Restore inherited permissions') ?></button><?php endif; ?>
+                        <?php endif; ?>
                     </p>
                 </form>
             </div>
@@ -5730,7 +5762,13 @@ function fm_show_header_login()
         $tr['en']['normalRights']    = 'Normal Rights';
         $tr['en']['negativeRights']  = 'Negative Rights';
         $tr['en']['Unable to read the current AFS ACL'] = 'Unable to read the current AFS ACL';
-        $tr['en']['Inherited AuriStor ACLs are read-only here'] = 'Inherited AuriStor ACLs are read-only here';
+        $tr['en']['These permissions are inherited from the parent'] = 'These permissions are inherited from the parent. Make them specific to edit this file.';
+        $tr['en']['Make permissions specific'] = 'Make permissions specific';
+        $tr['en']['Make permissions specific before changing them'] = 'Make permissions specific before changing them';
+        $tr['en']['Restore inherited permissions'] = 'Restore inherited permissions';
+        $tr['en']['Restore inherited permissions?'] = 'Restore inherited permissions?';
+        $tr['en']['Inherited permissions restored'] = 'Inherited permissions restored';
+        $tr['en']['Inherited permissions not restored'] = 'Inherited permissions not restored';
         $tr['en']['Copying']        = 'Copying';
         $tr['en']['CreateNewItem']  = 'Create New Item';
         $tr['en']['Name']           = 'Name';

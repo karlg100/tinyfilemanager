@@ -176,7 +176,13 @@ afs_test_ok(
     'ACL writes re-read current inheritance state before fs setacl'
 );
 afs_test_contains($aclSubmit, "!empty(\$currentAcl['inherited'])",
-    'inherited AuriStor ACL writes fail closed server-side');
+    'ACL writes revalidate inherited state server-side');
+afs_test_contains($aclSubmit, '$breakInheritance',
+    'inherited ACL writes require an explicit break-inheritance intent');
+afs_test_contains($aclSubmit, '$aclIsFile',
+    'break and restore inheritance operations are restricted to files');
+afs_test_contains($aclSubmit, '$afs->restoreAclInheritance($aclPath)',
+    'restore-inheritance POST uses the typed AFS provider method');
 $mappedAclSets = preg_match('/[\'\"]normal[\'\"]\s*=>\s*false.*[\'\"]negative[\'\"]\s*=>\s*true/s', $aclSubmit) === 1;
 $dynamicAclLookup = strpos($aclSubmit, '$_POST[$setName]') !== false;
 afs_test_ok(
@@ -207,8 +213,16 @@ afs_test_contains($aclSubmit, '$aclBatches', 'ACL entries are batched by positiv
 $aclUi = afs_test_section($manager, '// Edit AFS ACLs', '// --- TINYFILEMANAGER MAIN ---', 'AFS ACL editor');
 afs_test_contains($aclUi, '$afs->readAcl($file_path)', 'ACL editor reads the current AFS ACL');
 afs_test_contains($aclUi, "!empty(\$mode['inherited'])", 'ACL editor detects inherited AuriStor ACLs');
-afs_test_contains($aclUi, "<fieldset<?php echo \$acl_readonly ? ' disabled' : ''; ?>",
-    'unreadable and inherited ACL controls are disabled');
+afs_test_contains($aclUi,
+    "<fieldset id=\"acl-permission-fields\"<?php echo (\$acl_readonly || \$acl_inherited) ? ' disabled' : ''; ?>",
+    'unreadable and initially inherited ACL controls are disabled');
+afs_test_contains($aclUi, 'name="break_inheritance" value="0"',
+    'inherited ACL editor starts with a fail-closed break flag');
+afs_test_contains($aclUi,
+    "document.getElementById('acl-permission-fields').disabled=false",
+    'make-specific button enables the current inherited ACL matrix');
+afs_test_contains($aclUi, 'name="restore_inheritance" value="1"',
+    'file-specific ACL editor offers restoration of inheritance');
 
 $rights = array('l', 'r', 'w', 'i', 'd', 'k', 'a',
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H');
@@ -309,6 +323,7 @@ foreach (array(
     "self::brokerRequest( 1, 0, \$payload )",
     "self::brokerRequest( 2, 0, \$path )",
     "self::brokerRequest( 3, \$negative ? 1 : 0, \$payload )",
+    "self::brokerRequest( 5, 0, \$path )",
     "pack( 'a4CCCCN', 'AACL', 1, \$operation, \$flags, 0,"
 ) as $brokerContract) {
     afs_test_contains($afs, $brokerContract,
