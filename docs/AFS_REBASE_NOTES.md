@@ -184,9 +184,11 @@ The original focused suite passed under PHP 7.4 and PHP 8.3. After the independe
 The request-broker/batching branch adds `getACLAccessBatch()` with both a
 128-path and 262144-byte payload boundary, exact mixed-result mapping, and a
 versioned typed broker client at the existing `runFs()` seam. The client
-permits at most 128 typed operations per request. Listings use a second
-bounded batch for inheritance metadata, so the 512/513 row boundary does not
-silently lose its fifth batch while the total remains bounded. Each
+permits at most 128 typed operations per request. The main listing uses only
+the proven caller-access batch. A separate read-only JSON request fetches
+bounded inheritance metadata after the permission text is rendered; failure
+of that optional request omits only the inherited icon and cannot blank the
+permission column. The 512/513 row boundary remains bounded. Each
 request and response frame uses one absolute six-second monotonic `hrtime()`
 deadline rather than resetting the timeout after partial I/O, and fails closed
 when that monotonic clock is unavailable. The broker client exposes only

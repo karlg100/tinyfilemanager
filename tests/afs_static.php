@@ -296,7 +296,7 @@ afs_test_contains($brokerClient, '$now = hrtime( true );',
 afs_test_ok(strpos($brokerClient, 'microtime(') === false,
     'broker frame deadlines never use the adjustable wall clock');
 afs_test_contains($brokerClient, 'self::$aclBrokerRequests >= 128',
-    'broker operations bound access plus inheritance metadata batches');
+    'broker operations retain an explicit per-request frame budget');
 afs_test_contains($brokerClient,
     "function_exists( 'fm_open_afs_acl_broker_stream' )",
     'CGI broker transport requires the deployment-provided stream factory');
@@ -333,6 +333,10 @@ foreach (array(
 
 $folderListing = afs_test_section($manager, '$ii = 3399;', '$ik = 8002;', 'folder-listing loop');
 $fileListing = afs_test_section($manager, '$ik = 8002;', 'if (empty($folders) && empty($files))', 'file-listing loop');
+$listingPrep = afs_test_section($manager, '// --- TINYFILEMANAGER MAIN ---', '$metadata_column_count', 'main listing metadata preparation');
+$inheritanceEndpoint = afs_test_section($manager,
+    '// Fetch file-inheritance indicators separately from the main directory page.',
+    '// upload form', 'asynchronous inheritance endpoint');
 afs_test_ok(substr_count($folderListing, '->getACLAccess(') === 0,
     'folder rows consume prefetched caller access without subprocesses');
 afs_test_ok(substr_count($fileListing, '->getACLAccess(') === 0,
@@ -341,8 +345,22 @@ afs_test_ok(substr_count($manager, '->getACLAccessBatch(') === 1,
     'Tiny File Manager has one batched caller-access call site');
 afs_test_ok(substr_count($manager, '->getACLInheritanceBatch(') === 1,
     'Tiny File Manager has one batched inheritance-state call site');
-afs_test_contains($fileListing, "lng('Permissions inherited from parent')",
-    'file rows label inherited permissions with an accessible tooltip');
+afs_test_ok(strpos($listingPrep, '->getACLInheritanceBatch(') === false,
+    'main listing permission rendering never waits on inheritance metadata');
+afs_test_contains($inheritanceEndpoint, '->getACLInheritanceBatch($inheritancePaths)',
+    'the separate read-only endpoint batches inheritance metadata');
+afs_test_contains($inheritanceEndpoint, "header('Cache-Control: no-store')",
+    'inheritance metadata is never cached');
+afs_test_contains($inheritanceEndpoint, 'exit;',
+    'inheritance metadata exits before the main permission listing');
+afs_test_contains($fileListing, 'data-afs-inheritance-file=',
+    'file permission cells expose an encoded icon target');
+afs_test_contains($manager, "fetch(inheritanceUrl, {",
+    'inheritance icons load only after the permission listing is complete');
+afs_test_contains($manager, "icon.setAttribute('aria-label', inheritedTitle)",
+    'asynchronous inherited-permission icons retain an accessible tooltip');
+afs_test_contains($manager, '// Permission text is already complete; omit only the icon.',
+    'inheritance metadata failure cannot blank rendered permissions');
 afs_test_contains($manager, '$enable_afs_acl_operations = true;',
     'native AFS deployments retain ACL operations unless config disables them');
 afs_test_contains($manager,
