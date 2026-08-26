@@ -293,6 +293,49 @@ check($afs->getACLAccessBatch(array()) === array()
     && count($afs->commands) === $batchCommandCount + 1,
     'empty getcalleraccess batches do not launch fs');
 
+$inheritanceCommandCount = count($afs->commands);
+$afs->responses[] = implode("\n", array(
+    'Access list (inherited) for /afs/one is',
+    'Normal rights:',
+    '  system:anyuser rl',
+    'Access list for /afs/name is odd is',
+    'Normal rights:',
+    '  system:anyuser rl'
+));
+$inheritance = $afs->getACLInheritanceBatch(array(
+    '/afs/one', '/afs/missing', '/afs/name is odd', "/afs/line\nbreak"
+));
+check(isset($inheritance['/afs/one']) && $inheritance['/afs/one'] === true
+    && isset($inheritance['/afs/name is odd'])
+    && $inheritance['/afs/name is odd'] === false
+    && !array_key_exists('/afs/missing', $inheritance)
+    && !array_key_exists("/afs/line\nbreak", $inheritance),
+    'batched listacl maps only exact confirmed inheritance headers');
+check(count($afs->commands) === $inheritanceCommandCount + 1
+    && $afs->commands[$inheritanceCommandCount] === array(
+        'listacl', '-path', '/afs/one', '/afs/missing', '/afs/name is odd'),
+    'inheritance state uses one structured batched listacl command');
+check($afs->getACLInheritanceBatch(array()) === array()
+    && count($afs->commands) === $inheritanceCommandCount + 1,
+    'empty inheritance batches do not launch fs');
+
+$inheritancePaths = array();
+for ($inheritanceIndex = 0; $inheritanceIndex < 129; $inheritanceIndex++) {
+    $inheritancePaths[] = '/afs/inheritance-' . $inheritanceIndex;
+}
+$inheritanceChunkCommandCount = count($afs->commands);
+$afs->responses[] = 'Access list (inherited) for /afs/inheritance-0 is';
+$afs->responses[] = 'Access list for /afs/inheritance-128 is';
+$chunkedInheritance = $afs->getACLInheritanceBatch($inheritancePaths);
+check(count($afs->commands) === $inheritanceChunkCommandCount + 2
+    && count($afs->commands[$inheritanceChunkCommandCount]) === 130
+    && $afs->commands[$inheritanceChunkCommandCount + 1]
+        === array('listacl', '-path', '/afs/inheritance-128'),
+    'inheritance metadata batches split at the 128-path boundary');
+check($chunkedInheritance['/afs/inheritance-0'] === true
+    && $chunkedInheritance['/afs/inheritance-128'] === false,
+    'chunked inheritance metadata preserves inherited and specific states');
+
 $chunkPaths = array();
 for ($chunkIndex = 0; $chunkIndex < 129; $chunkIndex++) {
     $chunkPaths[] = '/afs/chunk-' . $chunkIndex;
@@ -515,8 +558,8 @@ try {
 
     $requiredMethods = array('copy', 'copy_dirs', 'deleteFiles', 'removeFolder',
         'readfile', 'changeAcl', 'readAcl', 'getACLAccess',
-        'getACLAccessBatch', 'restoreAclInheritance',
-        'makePathAFSlocal');
+        'getACLAccessBatch', 'getACLInheritanceBatch',
+        'restoreAclInheritance', 'makePathAFSlocal');
     $reflection = new ReflectionClass('Afs');
     foreach ($requiredMethods as $method) {
         check($reflection->hasMethod($method), "retains Afs::$method");

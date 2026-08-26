@@ -2395,8 +2395,10 @@ $num_files = count($files);
 $num_folders = count($folders);
 $all_files_size = 0;
 $afsAclAccess = array();
+$afsAclInherited = array();
 if ($afsSupport && $enable_afs_acl_operations && !FM_IS_WIN && !$hide_Cols) {
     $aclPaths = array();
+    $aclFilePaths = array();
     foreach ($folders as $item) {
         $itemPath = fm_guard_existing($path . '/' . $item, 'dir');
         if ($itemPath !== false) {
@@ -2407,11 +2409,13 @@ if ($afsSupport && $enable_afs_acl_operations && !FM_IS_WIN && !$hide_Cols) {
         $itemPath = fm_guard_existing($path . '/' . $item, 'file');
         if ($itemPath !== false) {
             $aclPaths[] = $itemPath;
+            $aclFilePaths[] = $itemPath;
         }
     }
     if (!empty($aclPaths)) {
         $afs = new Afs($aclPaths[0]);
         $afsAclAccess = $afs->getACLAccessBatch($aclPaths);
+        $afsAclInherited = $afs->getACLInheritanceBatch($aclFilePaths);
     }
 }
 $metadata_column_count = (!FM_IS_WIN && !$hide_Cols) ? ($afsSupport ? 1 : 2) : 0;
@@ -2598,7 +2602,7 @@ $content_column_count = $table_column_count - (FM_READONLY ? 0 : 1);
                         </span></td>
                     <td data-order="b-<?php echo $date_sorting; ?>"><?php echo $modif ?></td>
                     <?php if (!FM_IS_WIN && !$hide_Cols): ?>
-                        <td><?php if (!FM_READONLY && (!$afsSupport || $enable_afs_acl_operations)): ?><a title="<?php echo 'Change Permissions' ?>" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
+                        <td><?php if (!FM_READONLY && (!$afsSupport || $enable_afs_acl_operations)): ?><a title="<?php echo 'Change Permissions' ?>" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?><?php if ($afsSupport && !empty($afsAclInherited[$item_path])): ?> <i class="fa fa-level-up text-muted" title="<?php echo lng('Permissions inherited from parent') ?>" aria-label="<?php echo lng('Permissions inherited from parent') ?>"></i><?php endif; ?>
                         </td>
                         <?php if (!$afsSupport): ?><td><?php echo fm_enc($owner['name'] . ':' . $group['name']) ?></td><?php endif; ?>
                     <?php endif; ?>
@@ -5769,6 +5773,7 @@ function fm_show_header_login()
         $tr['en']['Restore inherited permissions?'] = 'Restore inherited permissions?';
         $tr['en']['Inherited permissions restored'] = 'Inherited permissions restored';
         $tr['en']['Inherited permissions not restored'] = 'Inherited permissions not restored';
+        $tr['en']['Permissions inherited from parent'] = 'Permissions inherited from parent';
         $tr['en']['Copying']        = 'Copying';
         $tr['en']['CreateNewItem']  = 'Create New Item';
         $tr['en']['Name']           = 'Name';

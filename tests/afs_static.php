@@ -295,8 +295,8 @@ afs_test_contains($brokerClient, '$now = hrtime( true );',
     'broker frames use a monotonic absolute PHP deadline');
 afs_test_ok(strpos($brokerClient, 'microtime(') === false,
     'broker frame deadlines never use the adjustable wall clock');
-afs_test_contains($brokerClient, 'self::$aclBrokerRequests >= 64',
-    'broker operations retain a bounded budget above the 512-row boundary');
+afs_test_contains($brokerClient, 'self::$aclBrokerRequests >= 128',
+    'broker operations bound access plus inheritance metadata batches');
 afs_test_contains($brokerClient,
     "function_exists( 'fm_open_afs_acl_broker_stream' )",
     'CGI broker transport requires the deployment-provided stream factory');
@@ -323,6 +323,7 @@ foreach (array(
     "self::brokerRequest( 1, 0, \$payload )",
     "self::brokerRequest( 2, 0, \$path )",
     "self::brokerRequest( 3, \$negative ? 1 : 0, \$payload )",
+    "self::brokerRequest( 4, 0, \$payload )",
     "self::brokerRequest( 5, 0, \$path )",
     "pack( 'a4CCCCN', 'AACL', 1, \$operation, \$flags, 0,"
 ) as $brokerContract) {
@@ -338,6 +339,10 @@ afs_test_ok(substr_count($fileListing, '->getACLAccess(') === 0,
     'file rows consume prefetched caller access without subprocesses');
 afs_test_ok(substr_count($manager, '->getACLAccessBatch(') === 1,
     'Tiny File Manager has one batched caller-access call site');
+afs_test_ok(substr_count($manager, '->getACLInheritanceBatch(') === 1,
+    'Tiny File Manager has one batched inheritance-state call site');
+afs_test_contains($fileListing, "lng('Permissions inherited from parent')",
+    'file rows label inherited permissions with an accessible tooltip');
 afs_test_contains($manager, '$enable_afs_acl_operations = true;',
     'native AFS deployments retain ACL operations unless config disables them');
 afs_test_contains($manager,

@@ -184,13 +184,14 @@ The original focused suite passed under PHP 7.4 and PHP 8.3. After the independe
 The request-broker/batching branch adds `getACLAccessBatch()` with both a
 128-path and 262144-byte payload boundary, exact mixed-result mapping, and a
 versioned typed broker client at the existing `runFs()` seam. The client
-permits at most 64 typed operations per request, so the 512/513 row boundary
-does not silently lose its fifth batch while the total remains bounded. Each
+permits at most 128 typed operations per request. Listings use a second
+bounded batch for inheritance metadata, so the 512/513 row boundary does not
+silently lose its fifth batch while the total remains bounded. Each
 request and response frame uses one absolute six-second monotonic `hrtime()`
 deadline rather than resetting the timeout after partial I/O, and fails closed
 when that monotonic clock is unavailable. The broker client exposes only
-caller-access, ACL-read, bounded ACL-change, and file-only
-inheritance-removal operations; it cannot carry an
+caller-access, batched inheritance metadata, ACL-read, bounded ACL-change,
+and file-only inheritance-removal operations; it cannot carry an
 executable, shell, environment, or raw output. If the trusted launcher does
 not advertise the broker, native installations retain the escaped CLI
 fallback. Under PHP-CGI, the deployment-provided stream factory maps one

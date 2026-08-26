@@ -1019,6 +1019,74 @@ class Afs
         return $access;
     }
 
+    // Return only positively confirmed inheritance state. Missing, denied, or
+    // malformed rows stay absent so the listing never labels them inherited.
+    function getACLInheritanceBatch( $paths )
+    {
+        if ( !is_array( $paths ) || empty( $paths )) {
+            return array();
+        }
+
+        $inheritance = array();
+        $safeToRequested = array();
+        foreach ( $paths as $path ) {
+            if ( !is_string( $path ) || $path === ''
+              || strpos( $path, "\0" ) !== false
+              || strpos( $path, "\r" ) !== false
+              || strpos( $path, "\n" ) !== false ) {
+                continue;
+            }
+            $safePath = $this->pathSecurity( $path );
+            if ( !$safePath ) {
+                continue;
+            }
+            if ( !isset( $safeToRequested[$safePath] )) {
+                $safeToRequested[$safePath] = array();
+            }
+            $safeToRequested[$safePath][] = $path;
+        }
+
+        $batches = array();
+        $safePaths = array();
+        $payloadSize = 2;
+        foreach ( array_keys( $safeToRequested ) as $safePath ) {
+            $encodedSize = 2 + strlen( $safePath );
+            if ( !empty( $safePaths )
+              && ( count( $safePaths ) >= 128
+                || $payloadSize + $encodedSize > 262144 )) {
+                $batches[] = $safePaths;
+                $safePaths = array();
+                $payloadSize = 2;
+            }
+            $safePaths[] = $safePath;
+            $payloadSize += $encodedSize;
+        }
+        if ( !empty( $safePaths )) {
+            $batches[] = $safePaths;
+        }
+
+        foreach ( $batches as $safePaths ) {
+            $result = $this->runFs( array_merge(
+                array( 'listacl', '-path' ), $safePaths ));
+            if ( $result === false ) {
+                continue;
+            }
+            foreach ( preg_split( '/\r?\n/', $result ) as $line ) {
+                if ( !preg_match(
+                        '/^Access list( \(inherited\))? for (.*) is$/D',
+                        $line, $matches )
+                  || !isset( $safeToRequested[$matches[2]] )) {
+                    continue;
+                }
+                foreach ( $safeToRequested[$matches[2]] as $requestedPath ) {
+                    $inheritance[$requestedPath] = !empty( $matches[1] );
+                }
+            }
+        }
+
+        return $inheritance;
+    }
+
     private static $aclBrokerStream = null;
     private static $aclBrokerUnavailable = false;
     private static $aclBrokerRequests = 0;
@@ -1110,7 +1178,7 @@ class Afs
 
     private static function brokerRequest( $operation, $flags, $payload )
     {
-        if ( self::$aclBrokerUnavailable || self::$aclBrokerRequests >= 64
+        if ( self::$aclBrokerUnavailable || self::$aclBrokerRequests >= 128
           || !is_string( $payload ) || strlen( $payload ) > 262144 ) {
             return false;
         }
@@ -1300,6 +1368,57 @@ class Afs
                 return false;
             }
             $this->lastFsStatus = 0;
+            return implode( "\n", $lines );
+        }
+
+        if ( $arguments[0] === 'listacl' && count( $arguments ) >= 3
+          && $arguments[1] === '-path' ) {
+            $paths = array_slice( $arguments, 2 );
+            if ( empty( $paths ) || count( $paths ) > 128 ) {
+                $this->lastFsStatus = 125;
+                return false;
+            }
+            $payload = pack( 'n', count( $paths ));
+            foreach ( $paths as $path ) {
+                $encoded = self::brokerPackString( $path );
+                if ( $encoded === false ) {
+                    $this->lastFsStatus = 125;
+                    return false;
+                }
+                $payload .= $encoded;
+            }
+            $response = self::brokerRequest( 4, 0, $payload );
+            if ( $response === false || $response['status'] !== 0 ) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $offset = 0;
+            $count = self::brokerTakeU16( $response['payload'], $offset );
+            if ( $count !== count( $paths )) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $lines = array();
+            $failed = false;
+            foreach ( $paths as $path ) {
+                $item = self::brokerTake( $response['payload'], $offset, 2 );
+                if ( $item === false || ord( $item[1] ) > 1 ) {
+                    $this->lastFsStatus = 126;
+                    return false;
+                }
+                if ( ord( $item[0] ) === 0 ) {
+                    $lines[] = 'Access list'
+                        . ( ord( $item[1] ) ? ' (inherited)' : '' )
+                        . ' for ' . $path . ' is';
+                } else {
+                    $failed = true;
+                }
+            }
+            if ( $offset !== strlen( $response['payload'] )) {
+                $this->lastFsStatus = 126;
+                return false;
+            }
+            $this->lastFsStatus = $failed ? 1 : 0;
             return implode( "\n", $lines );
         }
 
