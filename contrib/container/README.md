@@ -55,6 +55,28 @@ previews, online document viewing, and URL uploads. Managed files remain
 outside Apache's document root and downloads continue through the authenticated
 application.
 
+### Change the managed root
+
+Tiny File Manager's `$root_path` is separate from Apache's `DocumentRoot`.
+Keep Apache's document root at `/var/www/html` and mount a different host
+directory by replacing the `data` volume entry under `volumes:` in
+`compose.yaml`:
+
+```yaml
+- type: bind
+  source: /absolute/path/on/host
+  target: /srv/tinyfilemanager/data
+  bind:
+    create_host_path: false
+    selinux: Z
+```
+
+The host directory must be readable and writable by container UID/GID `33:33`.
+Do not mount managed files below `/var/www/html`, where Apache could serve them
+without Tiny File Manager authentication. To change the in-container path
+itself, update the Compose target, `$root_path` in `config.php`, and the fixed
+path in `validate-config.php`, then rebuild.
+
 For a TLS reverse proxy, set `$container_tls_proxy = true` so session cookies
 are marked `Secure`. Keep the container port on loopback, and configure the
 proxy to replace rather than append forwarded headers.
@@ -76,10 +98,7 @@ docker compose -f contrib/container/compose.yaml logs -f
 docker compose -f contrib/container/compose.yaml down
 ```
 
-The named data volume survives `down`. Running `down -v` deletes it. For a
-host bind mount instead, the data directory must be readable and writable by
-container UID/GID `33:33` and have an appropriate private label on SELinux
-hosts.
+The named data volume survives `down`. Running `down -v` deletes it.
 
 The built-in healthcheck is PHP/HTTP liveness only; it does not attest login,
 data integrity, or production readiness.
