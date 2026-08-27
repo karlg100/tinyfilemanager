@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+host=${TFM_PUBLIC_HOST:?TFM_PUBLIC_HOST is required}
+response=$(wget --no-check-certificate --server-response --spider \
+    --header "Host: $host" -T 3 https://127.0.0.1:8443/ 2>&1 || true)
+
+printf '%s\n' "$response" | grep -Eq 'HTTP/1\.[01][[:space:]]+401([[:space:]]|$)'
+printf '%s\n' "$response" \
+    | grep -Eiq '^[[:space:]]*WWW-Authenticate:[[:space:]]*Negotiate[[:space:]\r]*$'

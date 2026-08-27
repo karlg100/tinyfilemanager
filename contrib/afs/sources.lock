@@ -1,0 +1,19 @@
+# Source archives verified by contrib/afs/Dockerfile.
+mod_auth_gssapi 1.6.4
+url https://github.com/gssapi/mod_auth_gssapi/archive/refs/tags/v1.6.4.tar.gz
+sha256 7323affdba44ff560373c996b5eee8ac54fbb6067de5be8737c2f54c64c4e8e6
+
+mod_waklog 1.1.0
+url https://downloads.sourceforge.net/project/modwaklog/modwaklog/1.1.0/mod_waklog-1.1.0.tgz
+sha256 81b7e7ea38ba6c723b55f234ded9b30e983d227ad82398a368946741a4494a51
+commit 6c19351b63207837b6b06aec973ac025a48f9945
+
+# Runtime/build ABI used by the Debian Bookworm image.
+apache2-dev 2.4.68-1~deb12u1
+libapache2-mod-auth-gssapi 1.6.4-3
+libkrb5-dev 1.20.1-2+deb12u5
+libopenafs-dev 1.8.9-1+deb12u1
+libafsauthent2 1.8.9-1+deb12u1
+libafsrpc2 1.8.9-1+deb12u1
+libkopenafs2 1.8.9-1+deb12u1
+openafs-source https://sources.debian.org/src/openafs/1.8.9-1%2Bdeb12u1/

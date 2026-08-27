@@ -1,0 +1,345 @@
+--- a/src/mod_auth_gssapi.c
++++ b/src/mod_auth_gssapi.c
+@@ -4,6 +4,10 @@
+ #include "mod_auth_gssapi.h"
+ #include "mag_parse.h"
+ 
++#include <dirent.h>
++#include <errno.h>
++#include <limits.h>
++#include <signal.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ 
+@@ -300,60 +304,141 @@
+ }
+ 
+ #ifdef HAVE_CRED_STORE
+-static char *escape(apr_pool_t *pool, const char *name,
+-                    char find, const char *replace)
++#define TFM_CCACHE_PREFIX "tfm-ccache-"
++
++static void mag_cache_fatal(server_rec *server, const char *message)
+ {
+-    char *escaped = NULL;
+-    char *namecopy;
+-    char *n;
+-    char *p;
++    ap_log_error(APLOG_MARK, APLOG_CRIT, 0, server, "%s", message);
++    _exit(EXIT_FAILURE);
++}
+ 
+-    namecopy = apr_pstrdup(pool, name);
++static void mag_scrub_stale_ccaches(apr_pool_t *pool, server_rec *server,
++                                    const char *dir)
++{
++    const char *configured_dir = getenv("TFM_DELEG_CCACHE_DIR");
++    struct dirent *entry;
++    DIR *stream;
++    pid_t self = getpid();
+ 
+-    p = strchr(namecopy, find);
+-    if (!p) return namecopy;
++    if (configured_dir == NULL || strcmp(configured_dir, dir) != 0) {
++        mag_cache_fatal(server, "delegated cache directory contract mismatch");
++    }
++    stream = opendir(dir);
++    if (stream == NULL) {
++        mag_cache_fatal(server, "cannot inspect the delegated cache directory");
++    }
+ 
+-    /* first segment */
+-    n = namecopy;
+-    while (p) {
+-        /* terminate previous segment */
+-        *p = '\0';
+-        if (escaped) {
+-            escaped = apr_pstrcat(pool, escaped, n, replace, NULL);
+-        } else {
+-            escaped = apr_pstrcat(pool, n, replace, NULL);
++    errno = 0;
++    while ((entry = readdir(stream)) != NULL) {
++        const char *digits;
++        char *end = NULL;
++        const char *path;
++        struct stat info;
++        long owner;
++        bool stale = false;
++
++        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
++            errno = 0;
++            continue;
+         }
+-        /* move to next segment */
+-        n = p + 1;
+-        p = strchr(n, find);
++        if (strncmp(entry->d_name, TFM_CCACHE_PREFIX,
++                    strlen(TFM_CCACHE_PREFIX)) != 0) {
++            closedir(stream);
++            mag_cache_fatal(server, "unexpected delegated cache directory entry");
++        }
++        digits = entry->d_name + strlen(TFM_CCACHE_PREFIX);
++        errno = 0;
++        owner = strtol(digits, &end, 10);
++        if (errno != 0 || end == digits || *end != '-' || owner <= 0
++            || owner > INT_MAX) {
++            closedir(stream);
++            mag_cache_fatal(server, "invalid delegated cache filename");
++        }
++
++        if ((pid_t)owner == self) {
++            /* Remove a cache left by an earlier process that reused this PID. */
++            stale = true;
++        } else if (kill((pid_t)owner, 0) == -1) {
++            if (errno == ESRCH) {
++                stale = true;
++            } else if (errno != EPERM) {
++                closedir(stream);
++                mag_cache_fatal(server, "cannot validate a delegated cache owner");
++            }
++        }
++        if (!stale) {
++            errno = 0;
++            continue;
++        }
++
++        path = apr_psprintf(pool, "%s/%s", dir, entry->d_name);
++        if (lstat(path, &info) != 0) {
++            if (errno == ENOENT) {
++                errno = 0;
++                continue;
++            }
++            closedir(stream);
++            mag_cache_fatal(server, "cannot inspect a stale delegated cache");
++        }
++        if (!S_ISREG(info.st_mode) || info.st_nlink != 1) {
++            closedir(stream);
++            mag_cache_fatal(server, "unsafe stale delegated cache entry");
++        }
++        if (unlink(path) != 0 && errno != ENOENT) {
++            closedir(stream);
++            mag_cache_fatal(server, "cannot remove a stale delegated cache");
++        }
++        errno = 0;
+     }
+-    /* append last segment if any */
+-    if (*n) {
+-        escaped = apr_pstrcat(pool, escaped, n, NULL);
++    if (errno != 0) {
++        closedir(stream);
++        mag_cache_fatal(server, "cannot enumerate the delegated cache directory");
+     }
++    if (closedir(stream) != 0) {
++        mag_cache_fatal(server, "cannot close the delegated cache directory");
++    }
++}
+ 
+-    return escaped;
++static void mag_child_init(apr_pool_t *pool, server_rec *server)
++{
++    const char *dir = getenv("TFM_DELEG_CCACHE_DIR");
++
++    if (dir == NULL || *dir == '\0') {
++        mag_cache_fatal(server, "TFM_DELEG_CCACHE_DIR is required");
++    }
++    mag_scrub_stale_ccaches(pool, server, dir);
+ }
+ 
++static apr_status_t mag_ccache_cleanup(void *data)
++{
++    const char *path = data;
++
++    if (unlink(path) == 0 || errno == ENOENT) {
++        return APR_SUCCESS;
++    }
++
++    /* A worker that cannot remove delegated credentials must not be reused. */
++    _exit(EXIT_FAILURE);
++}
++
+ static char *get_ccache_name(request_rec *req, char *dir, const char *name,
+                              bool use_unique, apr_pool_t *pool)
+ {
+-    char *ccname, *escaped;
++    char *ccname;
+     int ccachefd;
+     mode_t umask_save;
+ 
+-    /* We need to escape away '/', we can't have path separators in
+-     * a ccache file name */
+-    /* first double escape the esacping char (~) if any */
+-    escaped = escape(req->pool, name, '~', "~~");
+-    /* then escape away the separator (/) if any */
+-    escaped = escape(req->pool, escaped, '/', "~");
+-
++    (void)name;
+     if (use_unique == false) {
+-        return apr_psprintf(pool, "%s/%s", dir, escaped);
++        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
++                      "delegated credentials require unique cache files");
++        return NULL;
+     }
+ 
+-    ccname = apr_psprintf(pool, "%s/%s-XXXXXX", dir, escaped);
++    /* Do not put a Kerberos principal in a filesystem name or error log. */
++    mag_scrub_stale_ccaches(pool, req->server, dir);
++    ccname = apr_psprintf(pool, "%s/" TFM_CCACHE_PREFIX "%ld-XXXXXX",
++                          dir, (long)getpid());
+ 
+     umask_save = umask(0177);
+     ccachefd = mkstemp(ccname);
+@@ -361,14 +446,14 @@
+ 
+     if (ccachefd == -1) {
+         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
+-                      "creating unique ccache file %s failed", ccname);
++                      "creating a unique delegated cache failed");
+         return NULL;
+     }
+     close(ccachefd);
+     return ccname;
+ }
+ 
+-static void mag_store_deleg_creds(request_rec *req, const char *ccname,
++static bool mag_store_deleg_creds(request_rec *req, const char *ccname,
+                                   gss_cred_id_t delegated_cred)
+ {
+     gss_key_value_element_desc element;
+@@ -383,10 +468,11 @@
+     maj = gss_store_cred_into(&min, delegated_cred, GSS_C_INITIATE,
+                               GSS_C_NULL_OID, 1, 1, &store, NULL, NULL);
+     if (GSS_ERROR(maj)) {
+-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req, "%s",
+-                      mag_error(req->pool, "failed to store delegated creds",
+-                                maj, min));
++        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
++                      "failed to store delegated credentials");
++        return false;
+     }
++    return true;
+ }
+ #endif
+ 
+@@ -1336,30 +1422,38 @@
+     }
+ 
+ #ifdef HAVE_CRED_STORE
+-    if (cfg->deleg_ccache_dir &&
+-        delegated_cred != GSS_C_NO_CREDENTIAL) {
++    if (cfg->deleg_ccache_dir) {
+         char *ccache_path;
+ 
+         mc->ccname = 0;
+-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, req,
+-                      "requester: %s", mc->gss_name);
++        if (delegated_cred == GSS_C_NO_CREDENTIAL) {
++            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
++                          "the client did not delegate credentials");
++            ret = HTTP_FORBIDDEN;
++            goto done;
++        }
+ 
+         ccache_path = get_ccache_name(req, cfg->deleg_ccache_dir, mc->gss_name,
+                                       cfg->deleg_ccache_unique, mc->pool);
+         if (ccache_path == NULL) {
++            ret = HTTP_INTERNAL_SERVER_ERROR;
+             goto done;
+         }
+ 
+-        mag_store_deleg_creds(req, ccache_path, delegated_cred);
+-        mc->delegated = true;
+-
+         if (!req_cfg->use_sessions && cfg->deleg_ccache_unique) {
+-            /* queue removing ccache to avoid littering filesystem */
++            /* Register cleanup before the cache receives credentials. */
+             apr_pool_cleanup_register(mc->pool, ccache_path,
+-                                      (int (*)(void *)) unlink,
++                                      mag_ccache_cleanup,
+                                       apr_pool_cleanup_null);
+         }
+ 
++        if (!mag_store_deleg_creds(req, ccache_path, delegated_cred)) {
++            unlink(ccache_path);
++            ret = HTTP_INTERNAL_SERVER_ERROR;
++            goto done;
++        }
++        mc->delegated = true;
++
+         /* extract filename from full path */
+         mc->ccname = strrchr(ccache_path, '/') + 1;
+     }
+@@ -1402,6 +1496,18 @@
+ 
+     /* Now set request data and env vars */
+     mag_set_req_data(req, cfg, mc);
++
++#ifdef HAVE_CRED_STORE
++    if (cfg->deleg_ccache_dir
++        && apr_table_get(mc->env, cfg->ccname_envvar) == NULL) {
++        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, req,
++                      "failed to validate the delegated cache");
++        mc->established = false;
++        mc->delegated = false;
++        ret = HTTP_INTERNAL_SERVER_ERROR;
++        goto done;
++    }
++#endif
+ 
+     ret = OK;
+ 
+@@ -2037,6 +2143,7 @@
+     ap_hook_check_user_id(mag_auth, NULL, NULL, APR_HOOK_MIDDLE);
+ #endif
+     ap_hook_post_config(mag_post_config, NULL, NULL, APR_HOOK_MIDDLE);
++    ap_hook_child_init(mag_child_init, NULL, NULL, APR_HOOK_MIDDLE);
+     ap_hook_pre_connection(mag_pre_connection, NULL, NULL, APR_HOOK_MIDDLE);
+ #ifdef HAVE_CRED_STORE
+     ap_hook_fixups(mag_s4u2self, NULL, NULL, APR_HOOK_MIDDLE);
+--- a/src/environ.c
++++ b/src/environ.c
+@@ -415,31 +415,35 @@
+         if ((cfg->deleg_ccache_mode != 0) &&
+             (finfo.protection != cfg->deleg_ccache_mode)) {
+             status = apr_file_perms_set(path, cfg->deleg_ccache_mode);
+-            if (status != APR_SUCCESS)
++            if (status != APR_SUCCESS) {
+                 ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, req,
+-                              "failed to set perms (%o) on file (%s)!",
+-                              cfg->deleg_ccache_mode, path);
++                              "failed to set delegated cache permissions");
++                return;
++            }
+         }
+         if ((cfg->deleg_ccache_uid != 0) &&
+             (finfo.user != cfg->deleg_ccache_uid)) {
+             status = lchown(path, cfg->deleg_ccache_uid, -1);
+-            if (status != 0)
++            if (status != 0) {
+                 ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, req,
+-                              "failed to set user (%u) on file (%s)!",
+-                              cfg->deleg_ccache_uid, path);
++                              "failed to set delegated cache owner");
++                return;
++            }
+         }
+         if ((cfg->deleg_ccache_gid != 0) &&
+             (finfo.group != cfg->deleg_ccache_gid)) {
+             status = lchown(path, -1, cfg->deleg_ccache_gid);
+-            if (status != 0)
++            if (status != 0) {
+                 ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, req,
+-                              "failed to set group (%u) on file (%s)!",
+-                              cfg->deleg_ccache_gid, path);
++                              "failed to set delegated cache group");
++                return;
++            }
+         }
+     } else {
+         /* set the file cache anyway, but warn */
+         ap_log_rerror(APLOG_MARK, APLOG_WARNING|APLOG_NOERRNO, 0, req,
+-                      "KRB5CCNAME file (%s) lookup failed!", path);
++                      "delegated cache lookup failed");
++        return;
+     }
+ 
+     value = apr_psprintf(req->pool, "FILE:%s", path);

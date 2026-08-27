@@ -22,7 +22,7 @@ disabled.
 
 `REMOTE_USER` is an identity string, not an AFS credential. Finish this guide
 and validate a real Kerberos browser sign-on before considering the separate
-[AFS and mod_waklog integration requirements](../../AFSSUPPORT.md). That guide
+[AFS and mod_waklog container profile](../afs/README.md). That guide
 describes a separate implementation with a different credential path and
 child image; binding `/afs` into the supplied container does not provide
 per-user AFS access.
@@ -201,7 +201,7 @@ kinit delegated-spn-admin@EXAMPLE.COM
 adcli update --domain=example.com \
   --host-fqdn=linuxhost.example.com \
   --host-keytab=/etc/krb5.keytab \
-  --login-ccache \
+  -C \
   --add-service-principal=HTTP/files.example.com
 kdestroy
 exit
@@ -249,8 +249,10 @@ and the [RHEL renewal guide](https://docs.redhat.com/en/documentation/red_hat_en
 Never mount `/etc/krb5.keytab` into the container. The supplied service takes a
 stable private snapshot, keeps only the exact HTTP principal's AES keys, and
 publishes them to `/var/lib/tinyfilemanager-keytab/keytabs/http.keytab`. It
-preserves current and previous KVNOs so AD replication can complete. The host
-keytab must be root-owned and inaccessible to group and others.
+always preserves the current KVNO and preserves a matching previous HTTP KVNO
+when one exists so AD replication can complete. A newly enrolled HTTP SPN can
+legitimately begin with only the current KVNO. The host keytab must be
+root-owned and inaccessible to group and others.
 
 Install the root-owned helper, units, and non-secret settings:
 
@@ -350,6 +352,35 @@ Open `https://files.example.com:8443`, substituting your host and port. The
 certificate name, URL host, DNS record, and HTTP SPN must agree. A request
 without Kerberos receives only a `Negotiate` challenge; an authenticated
 principal absent from `authorized-users` receives `403 Forbidden`.
+
+### Configure browser authentication
+
+Configure managed browsers for the exact FQDN. This authentication-only stack
+does **not** need credential delegation: leave every delegation allowlist empty.
+Do not use wildcards, short names, IP addresses, NTLM, or Basic fallback.
+
+- Microsoft Edge: set `AuthServerAllowlist=files.example.com` through the Edge
+  **HTTP authentication** policy (or the equivalent managed preference on
+  macOS). Restart and check `edge://policy`.
+- Google Chrome: set `AuthServerAllowlist=files.example.com` through Chrome
+  policy (`HKLM\SOFTWARE\Policies\Google\Chrome` on Windows,
+  `com.google.Chrome` on macOS, or managed policy JSON on Linux). Restart and
+  check `chrome://policy`.
+- Mozilla Firefox: set enterprise policy
+  `Authentication.SPNEGO=["https://files.example.com"]`, keep
+  `Authentication.Delegated` and `Authentication.NTLM` empty, and set the
+  non-FQDN and proxy options to false. Restart and check `about:policies`.
+- Safari: deploy Apple's Kerberos SSO extension with realm `EXAMPLE.COM` and
+  `Hosts=[files.example.com]`. The host list scopes authentication.
+
+Policy pages prove only that configuration loaded; a real Kerberos sign-on is
+the gate. The [AFS endpoint requirements](../afs/README.md#endpoint-requirements)
+add explicit delegation and explain why Safari is not assumed to forward a
+credential. See the Edge
+[`AuthServerAllowlist`](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies/authserverallowlist),
+Chromium [`AuthServerAllowlist`](https://chromium.googlesource.com/chromium/src/+/HEAD/components/policy/resources/templates/policy_definitions/HTTPAuthentication/AuthServerAllowlist.yaml),
+Firefox [Authentication policy](https://firefox-admin-docs.mozilla.org/reference/policies/authentication/),
+and Apple [Kerberos SSO guide](https://support.apple.com/guide/deployment/kerberos-sso-extension-depe6a1cda64/web).
 
 View logs or stop the stack with:
 

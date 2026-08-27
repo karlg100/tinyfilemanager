@@ -15,3 +15,6 @@ contrib/haproxy/gssproxy-healthcheck text eol=lf
 contrib/haproxy/haproxy-healthcheck text eol=lf
 contrib/haproxy/tls-secrets-init text eol=lf
 contrib/haproxy/systemd/* text eol=lf
+contrib/afs/** text eol=lf
+# Patch preimages retain upstream whitespace so they apply byte-for-byte.
+contrib/afs/patches/** whitespace=-trailing-space,-space-before-tab

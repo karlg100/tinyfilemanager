@@ -1,0 +1,118 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+
+readonly program=${0##*/}
+readonly export_dir=/var/lib/tinyfilemanager-keytab/keytabs
+readonly published_keytab=${export_dir}/http.keytab
+readonly runtime_dir=/run/tinyfilemanager-keytab-sync
+
+fail() {
+    printf '%s: %s\n' "$program" "$1" >&2
+    exit 1
+}
+
+log() {
+    printf '%s: %s\n' "$program" "$1"
+}
+
+container_ids() {
+    local service=$1
+
+    docker ps \
+        --filter "label=com.docker.compose.project=$TFM_PROJECT" \
+        --filter "label=com.docker.compose.service=$service" \
+        --format '{{.ID}}'
+}
+
+one_id_or_empty() {
+    local ids=$1
+    local service=$2
+    local count
+
+    count=$(awk 'NF { count++ } END { print count + 0 }' <<<"$ids")
+    [ "$count" -le 1 ] || fail "expected at most one running $service container"
+    awk 'NF { print; exit }' <<<"$ids"
+}
+
+wait_healthy() {
+    local id=$1
+    local service=$2
+    local status
+    local attempt
+
+    for ((attempt = 1; attempt <= 180; attempt++)); do
+        status=$(docker inspect --format \
+            '{{if not .State.Running}}stopped{{else if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+            "$id") || return 1
+        case "$status" in
+            healthy) return 0 ;;
+            stopped|missing) fail "$service stopped or has no healthcheck" ;;
+        esac
+        sleep 1
+    done
+    fail "$service did not become healthy"
+}
+
+main() {
+    local app_ids proxy_ids app_id proxy_id mount_info
+    local published_sha runtime_sha final_sha
+
+    [ "$(id -u)" = 0 ] || fail 'must run as root'
+    [[ "${TFM_PROJECT:-}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+        || fail 'TFM_PROJECT must be a lowercase Compose project name'
+    [ -f "$published_keytab" ] && [ ! -L "$published_keytab" ] \
+        || fail 'the validated HTTP keytab is missing'
+    [ -S /run/docker.sock ] || fail 'the rootful Docker socket is unavailable'
+
+    install -d -m 0700 "$runtime_dir"
+    exec 9>"$runtime_dir/sync.lock"
+    flock -n 9 || fail 'another keytab sync is running'
+
+    export DOCKER_HOST=unix:///run/docker.sock
+    export DOCKER_CONFIG=$runtime_dir/docker-config
+    unset DOCKER_CONTEXT
+    install -d -m 0700 "$DOCKER_CONFIG"
+    docker info >/dev/null
+
+    app_ids=$(container_ids tinyfilemanager)
+    proxy_ids=$(container_ids haproxy)
+    app_id=$(one_id_or_empty "$app_ids" tinyfilemanager)
+    proxy_id=$(one_id_or_empty "$proxy_ids" haproxy)
+
+    if [ -z "$app_id" ] && [ -z "$proxy_id" ]; then
+        log 'the AFS stack is stopped; its next normal start will load the keytab'
+        return 0
+    fi
+    [ -n "$app_id" ] || fail 'the AFS stack is partially running without Tiny File Manager'
+
+    mount_info=$(docker inspect --format \
+        '{{range .Mounts}}{{if eq .Destination "/run/secrets-source"}}{{.Type}}|{{.Source}}|{{.RW}}{{end}}{{end}}' \
+        "$app_id")
+    [ "$mount_info" = "bind|$export_dir|false" ] \
+        || fail 'the AFS app is not using the validated read-only keytab directory'
+
+    published_sha=$(sha256sum "$published_keytab" | awk '{print $1}')
+    runtime_sha=$(docker exec "$app_id" \
+        sha256sum /run/tinyfilemanager-keytab/http.keytab 2>/dev/null \
+        | awk 'NR == 1 {print $1}') || true
+
+    if [ "$runtime_sha" != "$published_sha" ]; then
+        docker restart --timeout 20 "$app_id" >/dev/null
+    fi
+    wait_healthy "$app_id" tinyfilemanager
+    [ -z "$proxy_id" ] || wait_healthy "$proxy_id" haproxy
+
+    runtime_sha=$(docker exec "$app_id" \
+        sha256sum /run/tinyfilemanager-keytab/http.keytab \
+        | awk 'NR == 1 {print $1}')
+    final_sha=$(sha256sum "$published_keytab" | awk '{print $1}')
+    [ "$runtime_sha" = "$published_sha" ] \
+        || fail 'Apache did not load the published HTTP keytab'
+    [ "$final_sha" = "$published_sha" ] \
+        || fail 'the published keytab changed during refresh'
+    log 'loaded the current HTTP keytab into the AFS Apache container'
+}
+
+main "$@"

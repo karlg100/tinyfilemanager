@@ -1,0 +1,29 @@
+[Unit]
+Description=Export and load the Tiny File Manager AFS HTTP keytab
+After=docker.service local-fs.target sssd.service
+Wants=docker.service
+ConditionPathExists=/etc/krb5.keytab
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tinyfilemanager-afs/keytab-sync.env
+ExecStart=/usr/local/sbin/tinyfilemanager-keytab-sync --export-only
+ExecStartPost=/usr/local/sbin/tinyfilemanager-afs-keytab-refresh
+UMask=0077
+RuntimeDirectory=tinyfilemanager-keytab-sync
+RuntimeDirectoryMode=0700
+StateDirectory=tinyfilemanager-keytab
+StateDirectoryMode=0700
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tinyfilemanager-keytab
+NoNewPrivileges=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+Restart=on-failure
+RestartSec=5min
+TimeoutStartSec=10min

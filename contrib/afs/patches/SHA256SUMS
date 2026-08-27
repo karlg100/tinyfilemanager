@@ -1,0 +1,3 @@
+ec3fb674feb5be704074583e3eceb3e05abfae2355a619098cad1a2b1cd52f72  mod_auth_gssapi/0001-delegated-cache-contract.patch
+4faca3fd87b6052c087456ebee95b204bb34921beb942aab63eea2a379a2ecfa  mod_waklog/0001-request-pag-hardening.patch
+7e560ff42a7039d8ce871f5f84de3f7f979f739ddab19134795d14ca3e6fa228  mod_waklog/0002-container-cache-contract.patch

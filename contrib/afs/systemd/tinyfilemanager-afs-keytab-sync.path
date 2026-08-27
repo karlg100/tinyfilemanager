@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the host keytab for Tiny File Manager AFS
+
+[Path]
+PathChanged=/etc/krb5.keytab
+Unit=tinyfilemanager-afs-keytab-sync.service
+
+[Install]
+WantedBy=paths.target

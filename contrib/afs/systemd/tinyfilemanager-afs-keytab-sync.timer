@@ -1,0 +1,12 @@
+[Unit]
+Description=Reconcile the Tiny File Manager AFS HTTP keytab
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+Unit=tinyfilemanager-afs-keytab-sync.service
+
+[Install]
+WantedBy=timers.target

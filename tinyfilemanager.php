@@ -118,6 +118,13 @@ $direct_links_enabled = true;
 $raw_previews_enabled = true;
 $url_upload_enabled = true;
 
+// Optional safety controls for storage providers where POSIX permissions and
+// archive extraction are not appropriate. External configurations may turn
+// these interfaces off; the defaults preserve the standalone application.
+$archive_enabled = true;
+$chmod_enabled = true;
+$symlinks_enabled = true;
+
 // Sticky Nav bar
 // true => enable sticky header
 // false => disable sticky header
@@ -512,6 +519,9 @@ defined('FM_SETTINGS_ENABLED') || define('FM_SETTINGS_ENABLED', $settings_enable
 defined('FM_DIRECT_LINKS_ENABLED') || define('FM_DIRECT_LINKS_ENABLED', $direct_links_enabled === true);
 defined('FM_RAW_PREVIEWS_ENABLED') || define('FM_RAW_PREVIEWS_ENABLED', $raw_previews_enabled === true);
 defined('FM_URL_UPLOAD_ENABLED') || define('FM_URL_UPLOAD_ENABLED', $url_upload_enabled === true);
+defined('FM_ARCHIVE_ENABLED') || define('FM_ARCHIVE_ENABLED', $archive_enabled === true);
+defined('FM_CHMOD_ENABLED') || define('FM_CHMOD_ENABLED', $chmod_enabled === true);
+defined('FM_SYMLINKS_ENABLED') || define('FM_SYMLINKS_ENABLED', $symlinks_enabled === true);
 define('FM_READONLY', $global_readonly || ($use_auth && !empty($readonly_users) && isset($_SESSION[FM_SESSION_ID]['logged']) && in_array($_SESSION[FM_SESSION_ID]['logged'], $readonly_users)));
 define('FM_IS_WIN', DIRECTORY_SEPARATOR == '\\');
 define('FM_AUTH_REMOTE_USER', $auth_remote_user === true);
@@ -537,6 +547,12 @@ $_POST = (strpos($input, 'ajax') != FALSE && strpos($input, 'save') != FALSE) ? 
 
 // instead globals vars
 define('FM_PATH', $p);
+
+if (!fm_is_path_allowed(FM_ROOT_PATH . (FM_PATH === '' ? '' : '/' . FM_PATH))) {
+    http_response_code(403);
+    exit('Invalid path');
+}
+
 define('FM_USE_AUTH', $use_auth);
 define('FM_EDIT_FILE', $edit_files);
 defined('FM_ICONV_INPUT_ENC') || define('FM_ICONV_INPUT_ENC', $iconv_input_encoding);
@@ -589,7 +605,8 @@ if (FM_IS_AUTHENTICATED && isset($_POST['ajax'], $_POST['token'])) {
         $file = $_GET['edit'];
         $file = fm_clean_path($file);
         $file = str_replace('/', '', $file);
-        if ($file == '' || !is_file($path . '/' . $file)) {
+        if ($file == '' || !fm_is_path_allowed($path . '/' . $file)
+            || !is_file($path . '/' . $file)) {
             fm_set_msg(lng('File not found'), 'error');
             $FM_PATH = FM_PATH;
             fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
@@ -620,7 +637,9 @@ if (FM_IS_AUTHENTICATED && isset($_POST['ajax'], $_POST['token'])) {
         $newFileName = "{$fileName}-{$date}.bak";
         $fullyQualifiedFileName = $fullPath . $fileName;
         try {
-            if (!file_exists($fullyQualifiedFileName)) {
+            if (!fm_is_path_allowed($fullyQualifiedFileName)
+                || !fm_is_path_allowed($fullPath . $newFileName)
+                || !file_exists($fullyQualifiedFileName)) {
                 throw new Exception("File {$fileName} not found");
             }
             if (copy($fullyQualifiedFileName, $fullPath . $newFileName)) {
@@ -805,7 +824,9 @@ if (isset($_POST['newfilename'], $_POST['newfile'], $_POST['token']) && !FM_READ
             $path .= '/' . FM_PATH;
         }
         if ($type == "file") {
-            if (!file_exists($path . '/' . $new)) {
+            if (!fm_is_path_allowed($path . '/' . $new)) {
+                fm_set_msg(lng('Invalid file or folder name'), 'error');
+            } elseif (!file_exists($path . '/' . $new)) {
                 if (fm_is_valid_ext($new)) {
                     @fopen($path . '/' . $new, 'w') or die('Cannot open file:  ' . $new);
                     fm_set_msg(sprintf(lng('File') . ' <b>%s</b> ' . lng('Created'), fm_enc($new)));
@@ -1027,7 +1048,8 @@ if (isset($_GET['dl'], $_POST['token'])) {
     }
 
     // Check if the file exists and is valid
-    if ($dl != '' && is_file($path . '/' . $dl)) {
+    if ($dl != '' && fm_is_path_allowed($path . '/' . $dl)
+        && is_file($path . '/' . $dl)) {
         // Close the session to prevent session locking
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_write_close();
@@ -1096,6 +1118,14 @@ if (!empty($_FILES) && !FM_READONLY) {
         $fullPath = $path . '/' . $fullPathInput;
         $folder = substr($fullPath, 0, strrpos($fullPath, "/"));
 
+        $partPath = $fullPath . '.part';
+        if (!fm_is_path_allowed($folder) || !fm_is_path_allowed($fullPath)
+            || !fm_is_path_allowed($partPath)) {
+            $response = array('status' => 'error', 'info' => 'Invalid upload path.');
+            echo json_encode($response);
+            exit();
+        }
+
         if (!is_dir($folder)) {
             $old = umask(0);
             mkdir($folder, 0777, true);
@@ -1104,7 +1134,7 @@ if (!empty($_FILES) && !FM_READONLY) {
 
         if (empty($f['file']['error']) && !empty($tmp_name) && $tmp_name != 'none' && $isFileAllowed) {
             if ($chunkTotal) {
-                $out = @fopen("{$fullPath}.part", $chunkIndex == 0 ? "wb" : "ab");
+                $out = @fopen($partPath, $chunkIndex == 0 ? "wb" : "ab");
                 if ($out) {
                     $in = @fopen($tmp_name, "rb");
                     if ($in) {
@@ -1155,7 +1185,11 @@ if (!empty($_FILES) && !FM_READONLY) {
                     } else {
                         $fullPathTarget = $fullPath;
                     }
-                    rename("{$fullPath}.part", $fullPathTarget);
+                    if (!fm_is_path_allowed($fullPathTarget)) {
+                        $response = array('status' => 'error', 'info' => 'Invalid upload path.');
+                    } else {
+                        rename($partPath, $fullPathTarget);
+                    }
                 }
             } else if (move_uploaded_file($tmp_name, $fullPath)) {
                 // Be sure that the file has been uploaded
@@ -1225,8 +1259,16 @@ if (isset($_POST['group'], $_POST['delete'], $_POST['token']) && !FM_READONLY) {
     fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
 }
 
+if (!FM_ARCHIVE_ENABLED
+    && ((isset($_POST['group'], $_POST['token'])
+            && (isset($_POST['zip']) || isset($_POST['tar'])))
+        || isset($_POST['unzip']))) {
+    http_response_code(403);
+    exit('Archive operations are disabled');
+}
+
 // Pack files zip, tar
-if (isset($_POST['group'], $_POST['token']) && (isset($_POST['zip']) || isset($_POST['tar'])) && !FM_READONLY) {
+if (isset($_POST['group'], $_POST['token']) && (isset($_POST['zip']) || isset($_POST['tar'])) && !FM_READONLY && FM_ARCHIVE_ENABLED) {
 
     if (!verifyToken($_POST['token'])) {
         fm_set_msg(lng("Invalid Token."), 'error');
@@ -1291,7 +1333,7 @@ if (isset($_POST['group'], $_POST['token']) && (isset($_POST['zip']) || isset($_
 }
 
 // Unpack zip, tar
-if (isset($_POST['unzip'], $_POST['token']) && !FM_READONLY) {
+if (isset($_POST['unzip'], $_POST['token']) && !FM_READONLY && FM_ARCHIVE_ENABLED) {
 
     if (!verifyToken($_POST['token'])) {
         fm_set_msg(lng("Invalid Token."), 'error');
@@ -1361,8 +1403,13 @@ if (isset($_POST['unzip'], $_POST['token']) && !FM_READONLY) {
     fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
 }
 
+if (!FM_CHMOD_ENABLED && (isset($_POST['chmod']) || isset($_GET['chmod']))) {
+    http_response_code(403);
+    exit('Permission changes are disabled');
+}
+
 // Change Perms (not for Windows)
-if (isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !FM_IS_WIN) {
+if (isset($_POST['chmod'], $_POST['token']) && !FM_READONLY && !FM_IS_WIN && FM_CHMOD_ENABLED) {
 
     if (!verifyToken($_POST['token'])) {
         fm_set_msg(lng("Invalid Token."), 'error');
@@ -1451,6 +1498,9 @@ if (is_array($objects) && fm_is_exclude_items($current_path, $path)) {
             continue;
         }
         $new_path = $path . '/' . $file;
+        if (!fm_is_path_allowed($new_path)) {
+            continue;
+        }
         if (@is_file($new_path) && fm_is_exclude_items($file, $new_path)) {
             $files[] = $file;
         } elseif (@is_dir($new_path) && $file != '.' && $file != '..' && fm_is_exclude_items($file, $new_path)) {
@@ -1828,7 +1878,9 @@ if (isset($_GET['view'])) {
     $file = $_GET['view'];
     $file = fm_clean_path($file, false);
     $file = str_replace('/', '', $file);
-    if ($file == '' || !is_file($path . '/' . $file) || !fm_is_exclude_items($file, $path . '/' . $file)) {
+    if ($file == '' || !fm_is_path_allowed($path . '/' . $file)
+        || !is_file($path . '/' . $file)
+        || !fm_is_exclude_items($file, $path . '/' . $file)) {
         fm_set_msg(lng('File not found'), 'error');
         $FM_PATH = FM_PATH;
         fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
@@ -1938,7 +1990,7 @@ if (isset($_GET['view'])) {
                 <?php endif; ?>
                 <?php
                 // ZIP actions
-                if (!FM_READONLY && ($is_zip || $is_gzip) && $filenames !== false) {
+                if (!FM_READONLY && FM_ARCHIVE_ENABLED && ($is_zip || $is_gzip) && $filenames !== false) {
                     $zip_name = pathinfo($file_path, PATHINFO_FILENAME);
                 ?>
                     <form method="post" class="d-inline btn btn-outline-primary mb-0">
@@ -2036,7 +2088,9 @@ if (isset($_GET['edit']) && !FM_READONLY) {
     $file = $_GET['edit'];
     $file = fm_clean_path($file, false);
     $file = str_replace('/', '', $file);
-    if ($file == '' || !is_file($path . '/' . $file) || !fm_is_exclude_items($file, $path . '/' . $file)) {
+    if ($file == '' || !fm_is_path_allowed($path . '/' . $file)
+        || !is_file($path . '/' . $file)
+        || !fm_is_exclude_items($file, $path . '/' . $file)) {
         fm_set_msg(lng('File not found'), 'error');
         $FM_PATH = FM_PATH;
         fm_redirect(FM_SELF_URL . '?p=' . urlencode($FM_PATH));
@@ -2137,7 +2191,7 @@ if (isset($_GET['edit']) && !FM_READONLY) {
 }
 
 // chmod (not for Windows)
-if (isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN) {
+if (isset($_GET['chmod']) && !FM_READONLY && !FM_IS_WIN && FM_CHMOD_ENABLED) {
     $file = $_GET['chmod'];
     $file = fm_clean_path($file);
     $file = str_replace('/', '', $file);
@@ -2314,7 +2368,7 @@ $all_files_size = 0;
                     <td data-order="a-<?php echo $date_sorting; ?>"><?php echo $modif ?></td>
                     <?php if (!FM_IS_WIN && !$hide_Cols): ?>
                         <td>
-                            <?php if (!FM_READONLY): ?><a title="Change Permissions" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
+                            <?php if (!FM_READONLY && FM_CHMOD_ENABLED): ?><a title="Change Permissions" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
                         </td>
                         <td>
                             <?php echo $owner['name'] . ':' . $group['name'] ?>
@@ -2394,7 +2448,7 @@ $all_files_size = 0;
                         </span></td>
                     <td data-order="b-<?php echo $date_sorting; ?>"><?php echo $modif ?></td>
                     <?php if (!FM_IS_WIN && !$hide_Cols): ?>
-                        <td><?php if (!FM_READONLY): ?><a title="<?php echo 'Change Permissions' ?>" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
+                        <td><?php if (!FM_READONLY && FM_CHMOD_ENABLED): ?><a title="<?php echo 'Change Permissions' ?>" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;chmod=<?php echo urlencode($f) ?>"><?php echo $perms ?></a><?php else: ?><?php echo $perms ?><?php endif; ?>
                         </td>
                         <td><?php echo fm_enc($owner['name'] . ':' . $group['name']) ?></td>
                     <?php endif; ?>
@@ -2447,10 +2501,12 @@ $all_files_size = 0;
                     <a href="#/invert-all" class="btn btn-small btn-outline-primary btn-2" onclick="invert_all();return false;"><i class="fa fa-th-list"></i> <?php echo lng('InvertSelection') ?> </a>
                     <input type="submit" class="hidden" name="delete" id="a-delete" value="Delete" onclick="return confirm('<?php echo lng('Delete selected files and folders?'); ?>')">
                     <a href="javascript:document.getElementById('a-delete').click();" class="btn btn-small btn-outline-primary btn-2"><i class="fa fa-trash"></i> <?php echo lng('Delete') ?> </a>
-                    <input type="submit" class="hidden" name="zip" id="a-zip" value="zip" onclick="return confirm('<?php echo lng('Create archive?'); ?>')">
-                    <a href="javascript:document.getElementById('a-zip').click();" class="btn btn-small btn-outline-primary btn-2"><i class="fa fa-file-archive-o"></i> <?php echo lng('Zip') ?> </a>
-                    <input type="submit" class="hidden" name="tar" id="a-tar" value="tar" onclick="return confirm('<?php echo lng('Create archive?'); ?>')">
-                    <a href="javascript:document.getElementById('a-tar').click();" class="btn btn-small btn-outline-primary btn-2"><i class="fa fa-file-archive-o"></i> <?php echo lng('Tar') ?> </a>
+                    <?php if (FM_ARCHIVE_ENABLED): ?>
+                        <input type="submit" class="hidden" name="zip" id="a-zip" value="zip" onclick="return confirm('<?php echo lng('Create archive?'); ?>')">
+                        <a href="javascript:document.getElementById('a-zip').click();" class="btn btn-small btn-outline-primary btn-2"><i class="fa fa-file-archive-o"></i> <?php echo lng('Zip') ?> </a>
+                        <input type="submit" class="hidden" name="tar" id="a-tar" value="tar" onclick="return confirm('<?php echo lng('Create archive?'); ?>')">
+                        <a href="javascript:document.getElementById('a-tar').click();" class="btn btn-small btn-outline-primary btn-2"><i class="fa fa-file-archive-o"></i> <?php echo lng('Tar') ?> </a>
+                    <?php endif; ?>
                     <input type="submit" class="hidden" name="copy" id="a-copy" value="Copy">
                     <a href="javascript:document.getElementById('a-copy').click();" class="btn btn-small btn-outline-primary btn-2"><i class="fa fa-files-o"></i> <?php echo lng('Copy') ?> </a>
                 </div>
@@ -2506,6 +2562,9 @@ function verifyToken($token)
  */
 function fm_rdelete($path)
 {
+    if (!fm_is_path_allowed($path)) {
+        return false;
+    }
     if (is_link($path)) {
         return unlink($path);
     } elseif (is_dir($path)) {
@@ -2583,6 +2642,9 @@ function fm_is_valid_ext($filename)
  */
 function fm_rename($old, $new)
 {
+    if (!fm_is_path_allowed($old) || !fm_is_path_allowed($new)) {
+        return false;
+    }
     $isFileAllowed = fm_is_valid_ext($new);
 
     if (!is_dir($old)) {
@@ -2602,6 +2664,9 @@ function fm_rename($old, $new)
  */
 function fm_rcopy($path, $dest, $upd = true, $force = true)
 {
+    if (!fm_is_path_allowed($path) || !fm_is_path_allowed($dest)) {
+        return false;
+    }
     if (!is_dir($path) && !is_file($path)) {
         return false;
     }
@@ -2635,6 +2700,9 @@ function fm_rcopy($path, $dest, $upd = true, $force = true)
  */
 function fm_mkdir($dir, $force)
 {
+    if (!fm_is_path_allowed($dir)) {
+        return false;
+    }
     if (file_exists($dir)) {
         if (is_dir($dir)) {
             return $dir;
@@ -2655,6 +2723,9 @@ function fm_mkdir($dir, $force)
  */
 function fm_copy($f1, $f2, $upd)
 {
+    if (!fm_is_path_allowed($f1) || !fm_is_path_allowed($f2)) {
+        return false;
+    }
     $time1 = filemtime($f1);
     if (file_exists($f2)) {
         $time2 = filemtime($f2);
@@ -2742,6 +2813,49 @@ function fm_clean_path($path, $trim = true)
         $path = '';
     }
     return str_replace('\\', '/', $path);
+}
+
+/**
+ * Reject symlink components when a storage profile disables symlinks.
+ * This is defense in depth; provider-specific mount boundaries still require
+ * their own validation.
+ *
+ * @param string $path Absolute path beneath FM_ROOT_PATH
+ * @return bool
+ */
+function fm_is_path_allowed($path)
+{
+    if (FM_SYMLINKS_ENABLED) {
+        return true;
+    }
+
+    $root = rtrim(str_replace('\\', '/', FM_ROOT_PATH), '/');
+    $path = str_replace('\\', '/', $path);
+    if ($path !== $root && strpos($path, $root . '/') !== 0) {
+        return false;
+    }
+
+    if (is_link($root)) {
+        return false;
+    }
+    $relative = ltrim(substr($path, strlen($root)), '/');
+    $current = $root;
+    if ($relative === '') {
+        return true;
+    }
+    foreach (explode('/', $relative) as $component) {
+        if ($component === '' || $component === '.') {
+            continue;
+        }
+        if ($component === '..') {
+            return false;
+        }
+        $current .= '/' . $component;
+        if (is_link($current)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**
@@ -3461,13 +3575,13 @@ function fm_get_file_mimes($extension)
 function scan($dir = '', $filter = '')
 {
     $path = FM_ROOT_PATH . '/' . $dir;
-    if ($path) {
+    if ($path && fm_is_path_allowed($path)) {
         $ite = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path));
         $rii = new RegexIterator($ite, "/(" . $filter . ")/i");
 
         $files = array();
         foreach ($rii as $file) {
-            if (!$file->isDir()) {
+            if (!$file->isDir() && fm_is_path_allowed($file->getPathname())) {
                 $fileName = $file->getFilename();
                 $location = str_replace(FM_ROOT_PATH, '', $file->getPath());
                 $files[] = array(
@@ -3490,6 +3604,9 @@ function scan($dir = '', $filter = '')
  */
 function fm_download_file($fileLocation, $fileName, $chunkSize  = 1024)
 {
+    if (!fm_is_path_allowed($fileLocation)) {
+        return false;
+    }
     if (connection_status() != 0)
         return (false);
     $extension = pathinfo($fileName, PATHINFO_EXTENSION);

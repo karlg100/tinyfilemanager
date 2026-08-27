@@ -1,0 +1,6 @@
+**
+!contrib/
+!contrib/haproxy/
+!contrib/haproxy/haproxy.cfg
+!contrib/afs/
+!contrib/afs/haproxy-healthcheck

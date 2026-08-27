@@ -1,0 +1,11 @@
+/authorized-users
+/config.php
+/keytab/
+/krb5.conf
+/openafs/
+/tls.crt
+/tls.key
+/.env
+/.env.afs
+/.env.non-afs
+*.ccache

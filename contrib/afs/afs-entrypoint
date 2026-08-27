@@ -1,0 +1,166 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    printf 'tinyfilemanager-afs: %s\n' "$1" >&2
+    exit 1
+}
+
+if [ "${1:-}" = 'apache2-foreground' ]; then
+    public_host=${TFM_PUBLIC_HOST:-}
+    realm=${TFM_AD_REALM:-}
+    afs_cell=${TFM_AFS_CELL:-}
+    afs_realm=${TFM_AFS_REALM:-}
+    expected_principal="HTTP/${public_host}@${realm}"
+    keytab_source=/run/secrets-source/http.keytab
+    keytab_dir=/run/tinyfilemanager-keytab
+    keytab_runtime=$keytab_dir/http.keytab
+    auth_dir=/run/tinyfilemanager-auth
+    config=/var/www/html/config.php
+    tls_cert=/run/tls-runtime/tls.crt
+    tls_key=/run/tls-runtime/tls.key
+    authorized_users=/run/policy/authorized-users
+
+    case "$public_host" in
+        ''|.*|*.|*..*|*[!a-z0-9.-]*)
+            fail 'TFM_PUBLIC_HOST must be a lowercase DNS hostname'
+            ;;
+    esac
+    case "$realm" in
+        ''|.*|*.|*..*|*[!A-Z0-9.-]*)
+            fail 'TFM_AD_REALM must be an uppercase Kerberos realm'
+            ;;
+    esac
+    case "$afs_cell" in
+        ''|.*|*.|*..*|*[!a-z0-9.-]*)
+            fail 'TFM_AFS_CELL must be a lowercase DNS cell name'
+            ;;
+    esac
+    case "$afs_realm" in
+        ''|.*|*.|*..*|*[!A-Z0-9.-]*)
+            fail 'TFM_AFS_REALM must be an uppercase Kerberos realm'
+            ;;
+    esac
+
+    [ -s "$config" ] || fail 'mount a non-empty config.php'
+    [ -s /etc/krb5.conf ] || fail 'mount a non-empty krb5.conf'
+    [ -s /etc/openafs/ThisCell ] || fail 'mount a non-empty OpenAFS ThisCell'
+    [ -s /etc/openafs/CellServDB ] || fail 'mount a non-empty OpenAFS CellServDB'
+    [ -s "$tls_cert" ] || fail 'mount a non-empty TLS certificate'
+    [ -s "$tls_key" ] || fail 'mount a non-empty TLS private key'
+    [ -s "$authorized_users" ] || fail 'mount a non-empty authorized-users file'
+    [ -f "$keytab_source" ] && [ ! -L "$keytab_source" ] \
+        && [ -s "$keytab_source" ] \
+        || fail 'keytab/http.keytab must be a non-empty regular file'
+
+    this_cell=$(awk 'NF && $1 !~ /^#/ { print $1; exit }' /etc/openafs/ThisCell)
+    [ "$this_cell" = "$afs_cell" ] || fail 'ThisCell does not match TFM_AFS_CELL'
+    awk -v cell="$afs_cell" '$1 == ">" cell { found = 1 } END { exit !found }' \
+        /etc/openafs/CellServDB \
+        || fail 'CellServDB does not contain TFM_AFS_CELL'
+
+    if ! awk '
+        {
+            separator = 0
+            for (field = 1; field <= NF; field++) {
+                if ($field == "-") { separator = field; break }
+            }
+            if ($5 == "/srv/tinyfilemanager/data" && separator \
+                && $(separator + 1) == "afs") found = 1
+        }
+        END { exit !found }
+    ' /proc/self/mountinfo; then
+        fail 'the data root must be a bind of an OpenAFS filesystem'
+    fi
+
+    runuser -u www-data -- test -r "$config" \
+        || fail 'config.php must be readable by the Apache worker'
+    if runuser -u www-data -- test -w "$config"; then
+        fail 'config.php must be mounted read-only'
+    fi
+    php -l "$config" >/dev/null
+    runuser -u www-data -- php \
+        /usr/local/lib/tinyfilemanager/validate-config.php "$config"
+
+    if ! awk -v group='tinyfilemanager:' '
+        /^[[:space:]]*(#|$)/ { next }
+        $1 != group || NF < 2 { exit 1 }
+        {
+            lines++
+            for (i = 2; i <= NF; i++) {
+                if (length($i) > 320 || $i !~ /@/ || seen[$i]++) exit 1
+            }
+        }
+        END { if (lines != 1) exit 1 }
+    ' "$authorized_users"; then
+        fail 'authorized-users must contain one exact tinyfilemanager group'
+    fi
+
+    openssl x509 -in "$tls_cert" -noout -checkend 0 >/dev/null \
+        || fail 'TLS certificate is invalid or expired'
+    openssl x509 -in "$tls_cert" -noout -checkhost "$public_host" >/dev/null \
+        || fail 'TLS certificate does not match TFM_PUBLIC_HOST'
+    openssl pkey -in "$tls_key" -passin pass: -noout >/dev/null 2>&1 \
+        || fail 'TLS private key is invalid or encrypted'
+    cert_key_id=$(openssl x509 -in "$tls_cert" -pubkey -noout \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')
+    private_key_id=$(openssl pkey -in "$tls_key" -passin pass: -pubout 2>/dev/null \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')
+    [ "$cert_key_id" = "$private_key_id" ] \
+        || fail 'TLS certificate and private key do not match'
+    unset cert_key_id private_key_id
+
+    install -d -o root -g www-data -m 0750 "$keytab_dir"
+    install -o www-data -g www-data -m 0400 "$keytab_source" "$keytab_runtime"
+    if ! runuser -u www-data -- klist -k "$keytab_runtime" \
+        | awk -v expected="$expected_principal" '
+            NR <= 3 { next }
+            $2 == expected { found = 1; next }
+            NF { unexpected = 1 }
+            END { exit !(found && !unexpected) }
+        '; then
+        fail 'keytab must contain only the expected HTTP service principal'
+    fi
+    if ! runuser -u www-data -- klist -ke "$keytab_runtime" \
+        | awk -v expected="$expected_principal" '
+            $2 == expected {
+                found = 1
+                if ($0 !~ / \((DEPRECATED:)?aes(128|256)-[^()]+\)[[:space:]]*$/) invalid = 1
+            }
+            END { exit !(found && !invalid) }
+        '; then
+        fail 'keytab entries must use AES encryption types'
+    fi
+
+    [ "${KRB5RCACHEDIR:-}" = "$auth_dir/rcache" ] \
+        || fail 'KRB5RCACHEDIR must use the private runtime directory'
+    [ "${TFM_DELEG_CCACHE_DIR:-}" = "$auth_dir/clientcaches" ] \
+        || fail 'TFM_DELEG_CCACHE_DIR must use the private runtime directory'
+    [ -z "${GSS_USE_PROXY:-}" ] && [ -z "${GSSPROXY_SOCKET:-}" ] \
+        || fail 'the direct AFS profile must not use gssproxy'
+    export KRB5_KTNAME="$keytab_runtime"
+    install -d -o www-data -g www-data -m 0700 \
+        "$auth_dir" "$auth_dir/clientcaches" "$auth_dir/rcache"
+    if find "$auth_dir/clientcaches" -mindepth 1 -maxdepth 1 \
+        -print -quit | grep -q .; then
+        fail 'the delegated-cache directory must be empty at startup'
+    fi
+    install -d -m 0755 /run/apache2 /run/lock/apache2
+    install -d -o www-data -g www-data -m 0700 \
+        /tmp/tinyfilemanager-sessions /tmp/tinyfilemanager-uploads
+
+    runuser -u www-data -- /usr/local/bin/afs-preflight \
+        || fail 'OpenAFS PAG/token preflight failed'
+    apache2ctl configtest
+    apache2ctl -M 2>/dev/null | grep -q 'mpm_prefork_module' \
+        || fail 'Apache prefork MPM is required'
+    if apache2ctl -M 2>/dev/null \
+        | grep -Eq '(http2|proxy_fcgi|fcgid|cgi|cgid)_module'; then
+        fail 'HTTP/2 and out-of-process handlers are forbidden'
+    fi
+    ulimit -c 0
+fi
+
+exec "$@"

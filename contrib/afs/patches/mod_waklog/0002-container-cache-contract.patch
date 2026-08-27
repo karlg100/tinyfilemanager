@@ -1,0 +1,148 @@
+--- a/mod_waklog.c
++++ b/mod_waklog.c
+@@ -4,6 +4,7 @@
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/stat.h>
+ #include <unistd.h>
+ 
+ #include "httpd.h"
+@@ -88,6 +89,8 @@
+ #define SLEEP_TIME      ( TKT_LIFE - 5*60 )
+ 
+ #define WAKLOG_UNSET -1
++#define WAKLOG_CCACHE_PREFIX \
++  "FILE:/run/tinyfilemanager-auth/clientcaches/tfm-ccache-"
+ 
+ #ifdef WAKLOG_DEBUG
+ #undef APLOG_DEBUG
+@@ -158,6 +161,48 @@
+     return rc;
+ 
+   return k_haspag() ? 0 : -1;
++}
++
++static int
++waklog_delegated_cache_is_safe(const char *ccname)
++{
++  const char *suffix;
++  const char *path;
++  char *end;
++  long owner;
++  struct stat st;
++  size_t index;
++
++  if (ccname == NULL ||
++      strncmp(ccname, WAKLOG_CCACHE_PREFIX,
++              sizeof(WAKLOG_CCACHE_PREFIX) - 1) != 0) {
++    return 0;
++  }
++
++  suffix = ccname + sizeof(WAKLOG_CCACHE_PREFIX) - 1;
++  errno = 0;
++  owner = strtol(suffix, &end, 10);
++  if (errno != 0 || end == suffix || *end != '-' ||
++      owner != (long)getpid())
++    return 0;
++  suffix = end + 1;
++  if (strlen(suffix) != 6)
++    return 0;
++  for (index = 0; index < 6; index++) {
++    if (!((suffix[index] >= 'a' && suffix[index] <= 'z') ||
++          (suffix[index] >= 'A' && suffix[index] <= 'Z') ||
++          (suffix[index] >= '0' && suffix[index] <= '9'))) {
++      return 0;
++    }
++  }
++
++  path = ccname + strlen("FILE:");
++  if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
++      st.st_uid != geteuid() || st.st_gid != getegid() ||
++      (st.st_mode & 07777) != 0600 || st.st_nlink != 1) {
++    return 0;
++  }
++  return 1;
+ }
+ 
+ #ifdef APACHE2
+@@ -481,8 +518,6 @@
+ #ifdef APACHE2       
+        if ( ! ( r && r->connection && r->user )) {
+          log_error(APLOG_MARK, APLOG_ERR, 0, s, "mod_waklog: self authentication selected, but no data available");
+-         log_error(APLOG_MARK, APLOG_ERR, 0, s, "mod_waklog: r->user=%s",
+-                   (r == NULL || r->user == NULL) ? "null" : r->user);
+          return -1;
+        }
+        
+@@ -501,6 +536,12 @@
+          log_error(APLOG_MARK, APLOG_ERR, 0, s,
+                    "mod_waklog: delegated user authentication requires "
+                    "GSS_NAME and KRB5CCNAME");
++         return -1;
++       }
++
++       if (!waklog_delegated_cache_is_safe(k5path)) {
++         log_error(APLOG_MARK, APLOG_ERR, 0, s,
++                   "mod_waklog: delegated credential cache failed validation");
+          return -1;
+        }
+ 
+@@ -618,8 +659,8 @@
+     
+     /* now, to the 'aklog' portion of our program. */
+     
+-    /** we make two attempts here, one for afs@REALM and one for afs/cell@REALM */
+-    for(attempt = 0; attempt <= 1; attempt++) {
++    /* This profile accepts only the explicit afs/<cell>@REALM service. */
++    for(attempt = 0; attempt < 1; attempt++) {
+       if (increds.client != NULL) {
+         krb5_free_principal(child.kcontext, increds.client);
+         increds.client = NULL;
+@@ -629,7 +670,7 @@
+         increds.server = NULL;
+       }
+ 
+-      cell_in_principal = (cfg->cell_in_principal + attempt) % 2;
++      cell_in_principal = 1;
+ 
+       log_error(APLOG_MARK, APLOG_DEBUG, 0, s, "mod_waklog: cell_in_principal=%d", cell_in_principal );
+       if (cell_in_principal) {
+@@ -676,14 +717,9 @@
+       increds.times.endtime = 0;
+       
+       if ( ( kerror = krb5_get_credentials (child.kcontext, 0, clientccache, &increds, &v5credsp ) ) ) {
+-        /* only complain once we've tried both afs@REALM and afs/cell@REALM */
+-        if (attempt>=1) {
+-          log_error(APLOG_MARK, APLOG_ERR, 0, s, "mod_waklog: krb5_get_credentials: %s",
+-                    afs_error_message(kerror));
+-          goto cleanup;
+-        } else {
+-          continue;
+-        }
++        log_error(APLOG_MARK, APLOG_ERR, 0, s,
++                  "mod_waklog: cannot obtain the configured AFS service credential");
++        goto cleanup;
+       }
+       cfg->cell_in_principal = cell_in_principal;
+       break;
+@@ -818,8 +854,7 @@
+     int forget_rc;
+ 
+     log_error(APLOG_MARK, APLOG_ERR, 0, s,
+-              "mod_waklog: token installation failed for %s: %s",
+-              k5user, afs_error_message(rc));
++              "mod_waklog: token installation failed");
+     forget_rc = ktc_ForgetAllTokens();
+     if (forget_rc != 0) {
+       log_error(APLOG_MARK, APLOG_ERR, 0, s,
+@@ -1332,6 +1367,9 @@
+          strlen(cursor_cfg->principal) >= MAXNAMELEN) ||
+         (cursor_cfg->default_principal != NULL &&
+          strlen(cursor_cfg->default_principal) >= MAXNAMELEN) ||
++        cursor_cfg->principal != NULL ||
++        cursor_cfg->default_principal != NULL ||
++        (get_cfg_protect(cursor_cfg) && !get_cfg_usertokens(cursor_cfg)) ||
+         (cursor_cfg->afs_cell_realm != NULL &&
+          strlen(cursor_cfg->afs_cell) +
+              strlen(cursor_cfg->afs_cell_realm) + 5 >= MAXNAMELEN)) {

@@ -1,25 +1,26 @@
-# AFS integration requirements (not supplied)
+# AFS implementation and security requirements
 
-> **Status:** The supplied images do not support AFS. This document defines
-> the additional design, build, and validation work required for a separate
-> AFS image. It is not a deployable AFS recipe.
+> **Status:** [`README.md`](README.md) supplies a separate, pinned OpenAFS
+> prototype and deployment recipe. It remains a trusted-intranet,
+> non-production profile until the documented live browser/KDC/AFS gate passes
+> on the target environment.
 
 Add this layer only after the
-[`contrib/haproxy`](contrib/haproxy/README.md) stack—which includes Tiny File
+[`contrib/haproxy`](../haproxy/README.md) stack—which includes Tiny File
 Manager—is healthy and a real Kerberos browser sign-on has passed. Do not
 modify or replace the working deployment while developing the AFS layer.
 
-At a glance: the proposed AFS layer is Linux-only, a bind mount alone is
-insufficient, per-user access requires delegated credentials, and no AFS image
-or Compose profile is supplied.
+At a glance: the AFS layer is Linux/OpenAFS-only, a bind mount alone is
+insufficient, per-user access requires full browser delegation, and the
+supplied profile still requires target-site acceptance testing.
 
 ## Keep the deployment layered
 
 | Layer | Responsibility | Supplied here |
 | --- | --- | --- |
-| [Base](contrib/container/README.md) | Tiny File Manager, fixed data root, and local storage | Yes |
+| [Base](../container/README.md) | Tiny File Manager, fixed data root, and local storage | Yes |
 | TLS and sign-on | HAProxy TCP pass-through, Apache TLS, Kerberos authentication, and an exact user allowlist | Yes |
-| AFS | Delegated user credential, PAG and token lifecycle, host AFS mount, and AFS-aware file operations | No; requirements below |
+| AFS | Delegated user credential, PAG and token lifecycle, host AFS mount, and restricted file operations | Prototype; live gate required |
 
 The HAProxy layer can remain unchanged: it passes the original TLS connection
 to Apache. The AFS layer must be a separately named child image and separate
@@ -42,8 +43,10 @@ The current stack also has constraints that an AFS profile must replace:
 - Startup requires anonymous UID 33 to read, write, and search the data root.
 - The image has no AFS user-space libraries, tools, or `mod_waklog` module.
 - The healthcheck tests HTTPS and PHP, not the managed filesystem.
-- Tiny File Manager follows symlinks, recursively crosses nested mount points,
-  and implements **Change Permissions** with POSIX `chmod`, not AFS ACLs.
+- Tiny File Manager's AFS profile rejects visible symlink components, but that
+  pathname check is race-prone and does not identify nested AFS volume mount
+  points. **Change Permissions** uses POSIX `chmod`, not AFS ACLs, so the
+  profile disables it.
 
 `$global_readonly` and `$readonly_users` block Tiny File Manager's intentional
 mutations, but they do not create an AFS identity or ACL boundary; startup still
@@ -57,7 +60,8 @@ the entire host `/afs` tree.
 
 ## Choose a credential design
 
-Select and review one design before writing the AFS Compose file.
+The supplied profile implements Design A. Design B remains an alternative
+architecture, not a supplied deployment mode.
 
 ### Design A: direct browser delegation
 
@@ -109,8 +113,7 @@ one worker: all Apache/PHP workers share UID 33 and can read live caches. The
 startup copy limits what is copied; it does not restore the gssproxy isolation
 boundary.
 
-After the reviewed module and entrypoint changes below, the illustrative
-Apache authentication delta is:
+The supplied Apache authentication block is:
 
 ```apache
 <Location "/">
@@ -147,13 +150,11 @@ required. Browser delegation policy limits which HTTP service receives the
 credential; it does not constrain which services a compromised HTTP service
 can request tickets for with that TGT.
 
-The pinned `mod_auth_gssapi` can log identities and principal-bearing cache
-filenames on warning/error paths, so configuration alone cannot meet the
-logging rule above. Pin a reviewed patch that uses opaque filenames and redacts
-the principal and cache path from every log level. Also keep Apache,
-`mod_auth_gssapi`, and Kerberos debug/trace logging disabled, pre-create the
-directories with correct ownership, and include negative log scans in
-validation.
+The supplied `mod_auth_gssapi` patch uses opaque cache names and removes the
+principal/cache pathname from delegated-cache failure paths. Other module or
+GSS debug paths can still expose identity or configuration details. Keep
+Apache, `mod_auth_gssapi`, `mod_waklog`, and Kerberos debug/trace logging
+disabled and include negative log scans in validation.
 
 `GssapiUseS4U2Proxy` is not a drop-in alternative. It exports an evidence
 ticket for a GSSAPI-aware application, while unmodified `mod_waklog` reads a
@@ -175,14 +176,17 @@ insufficient. A proxy-managed credential cache is not a native delegated TGT
 that unmodified `mod_waklog` can consume directly with libkrb5; see the pinned
 [gssproxy credential-storage source](https://github.com/gssapi/gssproxy/blob/675b592d74c66f5fae5285926d00e6d0cec70e43/src/mechglue/gpp_creds.c#L137-L228).
 
-## Build a separate AFS image
+## How the separate AFS image is built
 
-Use a multi-stage child build. Pin the base image by digest and pin every
-package or source input. The builder needs the Apache development files,
+The supplied multi-stage build pins the base image by digest, module sources by
+checksum, and its security-relevant Debian ABI packages by version. Generic
+build tools and live Debian mirrors are not fully pinned, so this is not a
+bit-for-bit reproducible build. A release process must use a retained package
+snapshot and pin every input. The builder needs the Apache development files,
 compiler/autotools, Kerberos development files, and the development package
-for the exact AFS client used on the host. It must build both the reviewed
-`mod_auth_gssapi` redaction patch and the `mod_waklog` hardening patch. The
-runtime image needs only:
+for the exact AFS client used on the host. It must build both the supplied
+`mod_auth_gssapi` delegated-cache patch and the `mod_waklog` hardening patches.
+The runtime image needs only:
 
 - the reviewed `mod_waklog` DSO and its matching AFS/Kerberos libraries;
 - read-only runtime mounts for the AFS cell and Kerberos configuration; and
@@ -221,22 +225,25 @@ directive, incomplete identity binding, and cleanup paths that are not adequate
 for a multi-user web service. Configuration alone does not correct those
 properties.
 
-After loading a reviewed module, its illustrative user-token configuration is:
+The supplied vhost uses this user-token configuration at virtual-host scope;
+these directives are not valid inside `<Location>`:
 
 ```apache
-WaklogAFSCell example.org
-WaklogAFSCellRealm EXAMPLE.ORG
-
-<Location "/">
+<VirtualHost *:8443>
+    WaklogAFSCell example.org
+    WaklogAFSCellRealm EXAMPLE.ORG
     WaklogEnabled On
     WaklogUseUserTokens On
-</Location>
+    # Retain the complete GSSAPI and AuthGroupFile block here.
+</VirtualHost>
 
-<Location "/healthz.php">
+<VirtualHost 127.0.0.1:8081>
+    WaklogAFSCell example.org
+    WaklogAFSCellRealm EXAMPLE.ORG
     WaklogEnabled Off
-    AuthType None
-    Require all granted
-</Location>
+    WaklogUseUserTokens Off
+    # Grant only /healthz.php on this loopback-only vhost.
+</VirtualHost>
 ```
 
 Replace the cell and realm. Do not configure `WaklogDefaultPrincipal` or
@@ -280,15 +287,19 @@ Before starting the AFS profile:
 6. Do not run recursive `chown`, `chmod`, or POSIX ACL commands on the AFS
    tree. Configure AFS ACLs with the provider's tools and disposable test data.
 
-The AFS entrypoint must verify that the expected mount is present without
-traversing protected content or demanding anonymous read/write access. A
-missing, wrong, or unmounted source must stop the container. Recreate the AFS
-container after a host remount.
+The supplied entrypoint verifies an AFS mount is present without traversing
+protected content or demanding anonymous read/write access, and it checks that
+the mounted cell configuration matches the requested cell. It cannot attest
+the bind's cell or volume from filesystem type alone. The operator must verify
+the exact source with `fs whichcell` and `fs examine` before every start; a
+missing or unmounted source stops the container. Recreate the AFS container
+after a host remount.
 
-Attach the application container to a narrowly controlled DNS/KDC egress
-network in addition to the internal HAProxy backend. Do not expose an
-application port or mount the AFS path into HAProxy, the TLS initializer, or a
-credential sidecar.
+The supplied Compose file gives the application ordinary egress in addition to
+the internal HAProxy backend. Before any production use, restrict that egress
+to the required DNS, KDC, PTS, and AFS dependencies with host or network policy.
+Do not expose an application port or mount the AFS path into HAProxy, the TLS
+initializer, or a credential sidecar.
 
 Run a separate host-side Cache Manager and mount readiness monitor. The
 credential-free `/healthz.php` endpoint cannot detect an inaccessible or
@@ -296,9 +307,10 @@ stalled AFS namespace. Browser TLS also does not configure or attest encryption
 between the host Cache Manager and AFS file servers.
 
 Tiny File Manager's configured root is a pathname prefix, not an AFS
-cell/volume boundary. A supported AFS child must enforce beneath-root access at
-operation time, disable the POSIX **Change Permissions** action, and review all
-recursive copy, move, delete, search, archive, and extraction paths.
+cell/volume boundary. The supplied guard rejects visible symlinks and disables
+archive extraction and POSIX **Change Permissions**, but it is not
+descriptor-rooted or race-free. Review recursive copy, move, delete, and search
+against the exact target namespace.
 
 ## Configure delegation and AFS authorization
 
@@ -324,15 +336,17 @@ shared by all UID-33 Apache/PHP workers. Limit access to managed intranet
 clients and treat compromise of one worker as compromise of every live
 delegated credential until it expires.
 
-## Key rotation is a separate profile
+## Key rotation is profile-specific
 
 The systemd helper in `contrib/haproxy/systemd` is designed for the supplied
 gssproxy sidecar. Do not silently reuse it for Design A.
 
-For direct delegation, create separately named root-owned units that export
+For direct delegation, the supplied separately named root-owned units export
 only the exact HTTP principal to a dedicated directory, recreate the AFS
-Apache container after replacement, and verify both the new KVNO and a real
-AFS sign-on before recording success. Keep the existing current/previous-KVNO,
+Apache container after replacement, and verify that its private keytab copy
+matches the published keytab before recording success. Health checks do not
+touch AFS; a real sign-on remains a separate operator validation gate. Keep
+the existing current and any validated previous KVNO,
 atomic-publication, private-permission, retry, and stopped-stack behavior from
 the HAProxy guide. Never point a root unit at a developer-writable checkout.
 
@@ -360,21 +374,22 @@ Do not expose diagnostics or use production data during validation.
 - Test token and cache cleanup after success, denial, client abort, logout,
   child recycling, and container restart. Browser logout does not itself
   revoke a Kerberos credential or kernel AFS token.
-- Exercise create, read, edit, upload, download, copy, move, rename, delete,
-  archive, and extraction on the disposable subtree. Confirm ACL behavior and
-  outside-root denial.
+- Exercise create, read, edit, upload, download, copy, move, rename, and delete
+  on the disposable subtree. Confirm the archive and **Change Permissions**
+  routes stay hidden and rejected, then confirm ACL behavior and outside-root
+  denial.
 - Test KDC failure, AFS server failure/stall, token expiry, HTTP-key rotation,
   host remount, and recovery. The ordinary `/healthz.php` endpoint must remain
   credential-free and is not an AFS readiness check.
 - Scan image layers, logs, and artifacts for keytabs, caches, tickets, tokens,
   principals, and private pathnames.
 
-Only a real browser/KDC/AFS test can establish this layer. No live AFS or
-delegation test is part of the supplied container validation.
+Only a real browser/KDC/AFS test can establish this layer. The repository build
+does not substitute for that deployment-specific validation.
 
 ## Rollback requirements
 
-The future AFS profile must have a tested rollback that stops only its
+The AFS profile must have a tested rollback that stops only its
 containers and recreates the unchanged HAProxy stack from
 `contrib/haproxy/compose.yaml`. It must not use `down -v` or delete host AFS
 data. Keep its image, Compose project, and volumes distinct from the base
@@ -389,6 +404,7 @@ operator cannot silently switch storage backends.
 - [`mod_waklog` 1.1.0 files](https://sourceforge.net/projects/modwaklog/files/modwaklog/1.1.0/)
 - [`mod_waklog` 1.1.0 source evaluated here](https://sourceforge.net/p/modwaklog/code/ci/6c19351b63207837b6b06aec973ac025a48f9945/tree/)
 - [OpenAFS user authentication and PAGs](https://docs.openafs.org/UserGuide/HDRWQ20.html)
+- [Debian source for the pinned OpenAFS 1.8.9 packages](https://sources.debian.org/src/openafs/1.8.9-1%2Bdeb12u1/)
 - [OpenAFS security advisories](https://openafs.org/frameless/security/)
 - [Apache prefork MPM](https://httpd.apache.org/docs/current/en/mod/prefork.html)
 - [Docker bind-mount behavior](https://docs.docker.com/engine/storage/bind-mounts/)

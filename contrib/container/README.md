@@ -78,7 +78,7 @@ commands for the two modes.
 An AFS mount is not an ordinary host directory. Do not apply the UID,
 ownership, ACL, or SELinux-relabel procedure below to AFS. After the HAProxy
 stack is working, see the separate
-[AFS integration requirements](../../AFSSUPPORT.md).
+[AFS container profile](../afs/README.md).
 
 Linux:
 
