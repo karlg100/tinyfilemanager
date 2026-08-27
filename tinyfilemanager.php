@@ -22,6 +22,11 @@ define('APP_TITLE', 'Tiny File Manager');
 // Is independent from IP white- and blacklisting
 $use_auth = true;
 
+// Trust the web server's authenticated and authorized REMOTE_USER instead of
+// local passwords. Enable only when the web server enforces both on every
+// request; never copy a client-supplied HTTP header into REMOTE_USER.
+$auth_remote_user = false;
+
 // Login user name and password
 // Users: array('Username' => 'Password', 'Username2' => 'Password2', ...)
 // Generate secure password hash - https://tinyfilemanager.github.io/docs/pwd.html
@@ -274,6 +279,43 @@ if (defined('FM_EMBED')) {
     restore_error_handler();
 }
 
+// Resolve server-authenticated identity before creating a CSRF token. External
+// authentication is checked on every request; an existing PHP session alone is
+// never accepted as proof of identity.
+$remote_user_authenticated = false;
+if (!is_bool($auth_remote_user)
+    || ($auth_remote_user && ($use_auth !== true || $auth_users !== array()))) {
+    http_response_code(500);
+    header('Content-Type: text/plain; charset=UTF-8');
+    exit('Invalid authentication configuration.');
+}
+if ($auth_remote_user) {
+    $remote_user = isset($_SERVER['REMOTE_USER']) && is_string($_SERVER['REMOTE_USER'])
+        ? $_SERVER['REMOTE_USER'] : '';
+    if ($remote_user === ''
+        || strlen($remote_user) > 320
+        || trim($remote_user) !== $remote_user
+        || preg_match('/[\x00-\x1F\x7F]/', $remote_user)) {
+        http_response_code(401);
+        header('Content-Type: text/plain; charset=UTF-8');
+        exit('Authenticated identity required.');
+    }
+    $session_user = isset($_SESSION[FM_SESSION_ID]['logged'])
+        && is_string($_SESSION[FM_SESSION_ID]['logged'])
+        ? $_SESSION[FM_SESSION_ID]['logged'] : '';
+    if ($session_user !== $remote_user) {
+        $_SESSION = array();
+        if (!session_regenerate_id(true)) {
+            http_response_code(500);
+            header('Content-Type: text/plain; charset=UTF-8');
+            exit('Unable to initialize authenticated session.');
+        }
+    }
+    $_SESSION[FM_SESSION_ID]['logged'] = $remote_user;
+    $remote_user_authenticated = true;
+    unset($remote_user, $session_user);
+}
+
 //Generating CSRF Token
 if (empty($_SESSION['token'])) {
     if (function_exists('random_bytes')) {
@@ -283,7 +325,7 @@ if (empty($_SESSION['token'])) {
     }
 }
 
-if (empty($auth_users)) {
+if (!$auth_remote_user && empty($auth_users)) {
     $use_auth = false;
 }
 
@@ -304,8 +346,10 @@ defined('FM_SELF_URL') || define('FM_SELF_URL', ($is_https ? 'https' : 'http') .
 
 // logout
 if (isset($_GET['logout'])) {
-    unset($_SESSION[FM_SESSION_ID]['logged']);
-    unset($_SESSION['token']);
+    if (!$auth_remote_user) {
+        unset($_SESSION[FM_SESSION_ID]['logged']);
+        unset($_SESSION['token']);
+    }
     fm_redirect(FM_SELF_URL);
 }
 
@@ -355,13 +399,20 @@ if ($ip_ruleset != 'OFF') {
 
 // Checking if the user is logged in or not. If not, it will show the login form.
 if ($use_auth) {
-    if (isset($_SESSION[FM_SESSION_ID]['logged'], $auth_users[$_SESSION[FM_SESSION_ID]['logged']])) {
+    if ($auth_remote_user && $remote_user_authenticated) {
+        // The web server authenticated REMOTE_USER for this request.
+    } elseif (isset($_SESSION[FM_SESSION_ID]['logged'], $auth_users[$_SESSION[FM_SESSION_ID]['logged']])) {
         // Logged
     } elseif (isset($_POST['fm_usr'], $_POST['fm_pwd'], $_POST['token'])) {
         // Logging In
         sleep(1);
         if (function_exists('password_verify')) {
             if (isset($auth_users[$_POST['fm_usr']]) && isset($_POST['fm_pwd']) && password_verify($_POST['fm_pwd'], $auth_users[$_POST['fm_usr']]) && verifyToken($_POST['token'])) {
+                if (!session_regenerate_id(true)) {
+                    http_response_code(500);
+                    header('Content-Type: text/plain; charset=UTF-8');
+                    exit('Unable to initialize authenticated session.');
+                }
                 $_SESSION[FM_SESSION_ID]['logged'] = $_POST['fm_usr'];
                 fm_set_msg(lng('You are logged in'));
                 fm_redirect(FM_SELF_URL);
@@ -463,6 +514,11 @@ defined('FM_RAW_PREVIEWS_ENABLED') || define('FM_RAW_PREVIEWS_ENABLED', $raw_pre
 defined('FM_URL_UPLOAD_ENABLED') || define('FM_URL_UPLOAD_ENABLED', $url_upload_enabled === true);
 define('FM_READONLY', $global_readonly || ($use_auth && !empty($readonly_users) && isset($_SESSION[FM_SESSION_ID]['logged']) && in_array($_SESSION[FM_SESSION_ID]['logged'], $readonly_users)));
 define('FM_IS_WIN', DIRECTORY_SEPARATOR == '\\');
+define('FM_AUTH_REMOTE_USER', $auth_remote_user === true);
+define('FM_IS_AUTHENTICATED', !$use_auth
+    || ($auth_remote_user
+        ? $remote_user_authenticated
+        : isset($_SESSION[FM_SESSION_ID]['logged'], $auth_users[$_SESSION[FM_SESSION_ID]['logged']])));
 
 // always use ?p=
 if (!isset($_GET['p']) && empty($_FILES)) {
@@ -488,12 +544,13 @@ defined('FM_USE_HIGHLIGHTJS') || define('FM_USE_HIGHLIGHTJS', $use_highlightjs);
 defined('FM_HIGHLIGHTJS_STYLE') || define('FM_HIGHLIGHTJS_STYLE', $highlightjs_style);
 defined('FM_DATETIME_FORMAT') || define('FM_DATETIME_FORMAT', $datetime_format);
 
-unset($p, $use_auth, $iconv_input_encoding, $use_highlightjs, $highlightjs_style);
+unset($p, $use_auth, $auth_remote_user, $remote_user_authenticated,
+    $iconv_input_encoding, $use_highlightjs, $highlightjs_style);
 
 /*************************** ACTIONS ***************************/
 
 // Handle all AJAX Request
-if ((isset($_SESSION[FM_SESSION_ID]['logged'], $auth_users[$_SESSION[FM_SESSION_ID]['logged']]) || !FM_USE_AUTH) && isset($_POST['ajax'], $_POST['token'])) {
+if (FM_IS_AUTHENTICATED && isset($_POST['ajax'], $_POST['token'])) {
     if (!verifyToken($_POST['token'])) {
         header('HTTP/1.0 401 Unauthorized');
         die("Invalid Token.");
@@ -3843,7 +3900,9 @@ function fm_show_nav_path($path)
                                     <a title="<?php echo lng('Settings') ?>" class="dropdown-item nav-link" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;settings=1"><i class="fa fa-cog" aria-hidden="true"></i> <?php echo lng('Settings') ?></a>
                                 <?php endif ?>
                                 <a title="<?php echo lng('Help') ?>" class="dropdown-item nav-link" href="?p=<?php echo urlencode(FM_PATH) ?>&amp;help=2"><i class="fa fa-exclamation-circle" aria-hidden="true"></i> <?php echo lng('Help') ?></a>
-                                <a title="<?php echo lng('Logout') ?>" class="dropdown-item nav-link" href="?logout=1"><i class="fa fa-sign-out" aria-hidden="true"></i> <?php echo lng('Logout') ?></a>
+                                <?php if (!FM_AUTH_REMOTE_USER): ?>
+                                    <a title="<?php echo lng('Logout') ?>" class="dropdown-item nav-link" href="?logout=1"><i class="fa fa-sign-out" aria-hidden="true"></i> <?php echo lng('Logout') ?></a>
+                                <?php endif; ?>
                             </div>
                         </li>
                     <?php else: ?>

@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    printf 'tinyfilemanager-gssproxy: %s\n' "$1" >&2
+    exit 1
+}
+
+if [ "${1:-}" = '/usr/sbin/gssproxy' ]; then
+    public_host=${TFM_PUBLIC_HOST:-}
+    realm=${TFM_AD_REALM:-}
+    keytab_source=/run/secrets-source/http.keytab
+    private_dir=/run/gssproxy-private
+    keytab_runtime=$private_dir/http.keytab
+    config_runtime=$private_dir/gssproxy.conf
+    socket_dir=/run/gssproxy-shared
+    expected_principal="HTTP/${public_host}@${realm}"
+
+    case "$public_host" in
+        ''|.*|*.|*..*|*[!a-z0-9.-]*)
+            fail 'TFM_PUBLIC_HOST must be a lowercase DNS hostname'
+            ;;
+    esac
+    case "$realm" in
+        ''|.*|*.|*..*|*[!A-Z0-9.-]*)
+            fail 'TFM_AD_REALM must be an uppercase Kerberos realm'
+            ;;
+    esac
+    [ -f "$keytab_source" ] && [ ! -L "$keytab_source" ] \
+        && [ -s "$keytab_source" ] \
+        || fail 'http.keytab must be a non-empty regular file'
+    [ -s /etc/krb5.conf ] || fail 'mount krb5.conf at /etc/krb5.conf'
+
+    install -d -o gssproxy -g gssproxy -m 0700 "$private_dir"
+    install -d -o gssproxy -g 33 -m 0750 "$socket_dir"
+    install -d -o gssproxy -g gssproxy -m 0700 "$private_dir/rcache"
+    install -o gssproxy -g gssproxy -m 0400 \
+        "$keytab_source" "$keytab_runtime"
+
+    if ! runuser -u gssproxy -- klist -k "$keytab_runtime" \
+        | awk -v expected="$expected_principal" '
+            NR <= 3 { next }
+            $2 == expected { found = 1; next }
+            NF { unexpected = 1 }
+            END { exit !(found && !unexpected) }
+        '; then
+        fail 'keytab must contain only the expected HTTP service principal'
+    fi
+    if ! runuser -u gssproxy -- klist -ke "$keytab_runtime" \
+        | awk -v expected="$expected_principal" '
+            $2 == expected {
+                found = 1
+                if ($0 !~ / \((DEPRECATED:)?aes(128|256)-[^()]+\)[[:space:]]*$/) {
+                    invalid = 1
+                }
+            }
+            END { exit !(found && !invalid) }
+        '; then
+        fail 'keytab entries must use AES encryption types'
+    fi
+
+    sed \
+        -e "s/__TFM_PUBLIC_HOST__/$public_host/g" \
+        -e "s/__TFM_AD_REALM__/$realm/g" \
+        /etc/gssproxy/gssproxy.conf.template > "$config_runtime"
+    chown gssproxy:gssproxy "$config_runtime"
+    chmod 0400 "$config_runtime"
+    export KRB5RCACHEDIR="$private_dir/rcache"
+fi
+
+exec "$@"

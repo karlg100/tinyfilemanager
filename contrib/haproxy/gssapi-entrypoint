@@ -1,0 +1,99 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    printf 'tinyfilemanager-gssapi: %s\n' "$1" >&2
+    exit 1
+}
+
+if [ "${1:-}" = "apache2-foreground" ]; then
+    public_host=${TFM_PUBLIC_HOST:-}
+    realm=${TFM_AD_REALM:-}
+
+    case "$public_host" in
+        ''|.*|*.|*..*|*[!a-z0-9.-]*)
+            fail 'TFM_PUBLIC_HOST must be a lowercase DNS hostname'
+            ;;
+    esac
+    case "$realm" in
+        ''|.*|*.|*..*|*[!A-Z0-9.-]*)
+            fail 'TFM_AD_REALM must be an uppercase Kerberos realm'
+            ;;
+    esac
+
+    tls_cert=/run/tls-runtime/tls.crt
+    tls_key=/run/tls-runtime/tls.key
+    authorized_users=/run/policy/authorized-users
+    gssproxy_socket=/run/gssproxy-shared/tinyfilemanager.sock
+
+    [ -s /etc/krb5.conf ] || fail 'mount krb5.conf at /etc/krb5.conf'
+    [ -s "$tls_cert" ] || fail 'mount a non-empty TLS certificate'
+    [ -s "$tls_key" ] || fail 'mount a non-empty TLS private key'
+    [ -s "$authorized_users" ] \
+        || fail 'mount a non-empty authorized-users file'
+    [ -S "$gssproxy_socket" ] \
+        || fail 'the gssproxy credential socket is unavailable'
+    [ "${GSS_USE_PROXY:-}" = 'yes' ] \
+        || fail 'GSS_USE_PROXY must remain enabled'
+    [ "${GSSPROXY_BEHAVIOR:-}" = 'LOCAL_FIRST' ] \
+        || fail 'GSSPROXY_BEHAVIOR must remain LOCAL_FIRST'
+    [ "${GSSPROXY_SOCKET:-}" = "$gssproxy_socket" ] \
+        || fail 'GSSPROXY_SOCKET does not match the private socket'
+    [ "${KRB5_KTNAME:-}" = '/run/no-local-keytab' ] \
+        || fail 'local keytab fallback must remain disabled'
+
+    runuser -u www-data -- test -r "$authorized_users" \
+        || fail 'authorized-users must be readable by the Apache worker'
+    if runuser -u www-data -- test -w "$authorized_users"; then
+        fail 'authorized-users must be mounted read-only'
+    fi
+    if ! awk -v group='tinyfilemanager:' '
+        /^[[:space:]]*(#|$)/ { next }
+        $1 != group || NF < 2 { exit 1 }
+        {
+            lines++
+            for (i = 2; i <= NF; i++) {
+                if (length($i) > 320 || $i !~ /@/ || seen[$i]++) exit 1
+            }
+        }
+        END { if (lines != 1) exit 1 }
+    ' "$authorized_users"; then
+        fail 'authorized-users must contain one exact tinyfilemanager group'
+    fi
+
+    openssl x509 -in "$tls_cert" -noout -checkend 0 > /dev/null \
+        || fail 'TLS certificate is invalid or expired'
+    openssl x509 -in "$tls_cert" -noout -checkhost "$public_host" > /dev/null \
+        || fail 'TLS certificate does not match TFM_PUBLIC_HOST'
+    openssl pkey -in "$tls_key" -passin pass: -noout > /dev/null 2>&1 \
+        || fail 'TLS private key is invalid or encrypted'
+    cert_key_id=$(openssl x509 -in "$tls_cert" -pubkey -noout \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')
+    private_key_id=$(openssl pkey -in "$tls_key" -passin pass: -pubout 2>/dev/null \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')
+    [ "$cert_key_id" = "$private_key_id" ] \
+        || fail 'TLS certificate and private key do not match'
+    unset cert_key_id private_key_id
+
+    if runuser -u www-data -- test -r "$tls_key"; then
+        fail 'TLS private key isolation failed'
+    fi
+
+    install -d -o root -g www-data -m 0750 /run/tinyfilemanager-gssapi
+    install -d -o www-data -g www-data -m 0700 \
+        /run/tinyfilemanager-gssapi/rcache
+    install -d -m 0755 /run/apache2 /run/lock/apache2
+    runuser -u www-data -- php -r '
+        $socket = @stream_socket_client(
+            "unix:///run/gssproxy-shared/tinyfilemanager.sock",
+            $errorCode, $errorMessage, 2);
+        if ($socket === false) exit(1);
+        fclose($socket);
+    ' || fail 'the Apache worker cannot connect to gssproxy'
+
+    apache2ctl configtest
+fi
+
+exec /usr/local/bin/container-entrypoint "$@"

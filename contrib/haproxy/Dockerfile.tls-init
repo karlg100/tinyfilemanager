@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+
+ARG DEBIAN_IMAGE=debian:bookworm-20260824-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM ${DEBIAN_IMAGE}
+
+LABEL org.opencontainers.image.title="Tiny File Manager TLS secret initializer" \
+      org.opencontainers.image.description="Copies TLS files into a permission-preserving runtime volume" \
+      org.opencontainers.image.source="https://github.com/prasathmani/tinyfilemanager" \
+      org.opencontainers.image.lifecycle="trusted-intranet-non-production"
+
+COPY contrib/haproxy/tls-secrets-init /usr/local/bin/tls-secrets-init
+
+RUN set -eux; \
+    chown root:root /usr/local/bin/tls-secrets-init; \
+    chmod 0555 /usr/local/bin/tls-secrets-init
+
+ENTRYPOINT ["/usr/local/bin/tls-secrets-init"]

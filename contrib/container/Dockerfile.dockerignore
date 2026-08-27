@@ -13,6 +13,11 @@
 !contrib/container/php.ini
 !contrib/container/validate-config.php
 !contrib/container/vhost.conf
+!contrib/haproxy/
+!contrib/haproxy/container-healthcheck-tls
+!contrib/haproxy/gssapi-entrypoint
+!contrib/haproxy/ports.conf
+!contrib/haproxy/tinyfilemanager-gssapi.conf
 
 # Runtime configuration and credentials must never enter the build context.
 contrib/container/config.php

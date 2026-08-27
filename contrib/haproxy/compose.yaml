@@ -1,0 +1,197 @@
+name: ${TFM_PROJECT:?Set TFM_PROJECT to a unique Compose project name}
+
+services:
+  haproxy:
+    image: tinyfilemanager-haproxy:${TFM_PROJECT}
+    build:
+      context: ../..
+      dockerfile: contrib/haproxy/Dockerfile
+    init: true
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      TFM_PUBLIC_HOST: "${TFM_PUBLIC_HOST:?Set TFM_PUBLIC_HOST to the certificate and SPN hostname}"
+    ports:
+      - "${TFM_BIND_ADDRESS:-127.0.0.1}:${TFM_HTTPS_PORT:-8443}:8443"
+    depends_on:
+      tinyfilemanager:
+        condition: service_healthy
+    networks:
+      - public
+      - backend
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    stop_grace_period: 20s
+
+  tls-secrets:
+    image: tinyfilemanager-tls-init:${TFM_PROJECT}
+    build:
+      context: ../..
+      dockerfile: contrib/haproxy/Dockerfile.tls-init
+    restart: "no"
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+    volumes:
+      - type: bind
+        source: ${TFM_TLS_CERT_PATH:-./tls.crt}
+        target: /run/secrets-source/tls.crt
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: bind
+        source: ${TFM_TLS_KEY_PATH:-./tls.key}
+        target: /run/secrets-source/tls.key
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: volume
+        source: tls_runtime
+        target: /run/tls-runtime
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+
+  gssproxy:
+    image: tinyfilemanager-gssproxy:${TFM_PROJECT}
+    build:
+      context: ../..
+      dockerfile: contrib/haproxy/Dockerfile.gssproxy
+    init: true
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    environment:
+      TFM_PUBLIC_HOST: "${TFM_PUBLIC_HOST:?Set TFM_PUBLIC_HOST to the certificate and SPN hostname}"
+      TFM_AD_REALM: "${TFM_AD_REALM:?Set TFM_AD_REALM to the uppercase Kerberos realm}"
+    volumes:
+      - type: bind
+        source: ${TFM_KRB5_CONFIG_PATH:-./krb5.conf}
+        target: /etc/krb5.conf
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ${TFM_KEYTAB_PATH:-./http.keytab}
+        target: /run/secrets-source/http.keytab
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: volume
+        source: gssproxy_socket
+        target: /run/gssproxy-shared
+    networks:
+      - kdc
+    tmpfs:
+      - /run:rw,nosuid,nodev,size=16m,mode=0755
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    stop_grace_period: 20s
+
+  tinyfilemanager:
+    image: tinyfilemanager-gssapi:${TFM_PROJECT}
+    build:
+      context: ../..
+      dockerfile: contrib/container/Dockerfile
+      target: gssapi
+    init: true
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - KILL
+      - SETGID
+      - SETUID
+    environment:
+      TFM_PUBLIC_HOST: "${TFM_PUBLIC_HOST:?Set TFM_PUBLIC_HOST to the certificate and SPN hostname}"
+      TFM_AD_REALM: "${TFM_AD_REALM:?Set TFM_AD_REALM to the uppercase Kerberos realm}"
+      # Apache's root parent enumerates the local mechanism; request workers
+      # then fall through to gssproxy because the local keytab cannot exist.
+      GSS_USE_PROXY: "yes"
+      GSSPROXY_BEHAVIOR: "LOCAL_FIRST"
+      GSSPROXY_SOCKET: /run/gssproxy-shared/tinyfilemanager.sock
+      KRB5_KTNAME: /run/no-local-keytab
+      KRB5RCACHEDIR: /run/tinyfilemanager-gssapi/rcache
+    depends_on:
+      gssproxy:
+        condition: service_healthy
+      tls-secrets:
+        condition: service_completed_successfully
+    expose:
+      - "8443"
+    volumes:
+      - type: bind
+        source: ${TFM_CONFIG_PATH:-./config.php}
+        target: /var/www/html/config.php
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: bind
+        source: ${TFM_KRB5_CONFIG_PATH:-./krb5.conf}
+        target: /etc/krb5.conf
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ${TFM_AUTHORIZED_USERS_PATH:-./authorized-users}
+        target: /run/policy/authorized-users
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: volume
+        source: tls_runtime
+        target: /run/tls-runtime
+        read_only: true
+      - type: volume
+        source: gssproxy_socket
+        target: /run/gssproxy-shared
+        read_only: true
+      - type: volume
+        source: data
+        target: /srv/tinyfilemanager/data
+    networks:
+      - backend
+    tmpfs:
+      - /run:rw,nosuid,nodev,size=16m,mode=0755
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+    stop_grace_period: 20s
+
+networks:
+  public:
+  backend:
+    internal: true
+  kdc:
+
+volumes:
+  data:
+  gssproxy_socket:
+  tls_runtime:

@@ -6,6 +6,7 @@ if (PHP_SAPI !== 'cli' || $argc !== 2) {
 }
 
 $use_auth = null;
+$auth_remote_user = false;
 $auth_users = null;
 $readonly_users = null;
 $directories_users = null;
@@ -31,11 +32,17 @@ if ($output !== '') {
     $errors[] = 'config.php must not produce output';
 }
 if ($use_auth !== true) {
-    $errors[] = 'local authentication must be enabled';
+    $errors[] = 'authentication must be enabled';
 }
-if (!is_array($auth_users) || $auth_users === array()) {
+if (!is_bool($auth_remote_user)) {
+    $errors[] = 'auth_remote_user must be a boolean';
+}
+if ($auth_remote_user === true && $auth_users !== array()) {
+    $errors[] = 'REMOTE_USER authentication cannot have local password users';
+} elseif ($auth_remote_user === false
+    && (!is_array($auth_users) || $auth_users === array())) {
     $errors[] = 'at least one local user is required';
-} else {
+} elseif ($auth_remote_user === false) {
     $defaultHashes = array(
         '$2y$10$/K.hjNr84lLNDt8fTXjoI.DBp6PpeyoJ.mGwrrLuCZfAwfSAGqhOW',
         '$2y$10$Fg6Dz8oH9fPoZ2jJan5tZuv6Z4Kp7avtQ9bDfrdRntXtPeiMAZyGO',
@@ -92,6 +99,9 @@ if (!is_bool($container_tls_proxy)) {
     if ($secureCookie !== $container_tls_proxy) {
         $errors[] = 'TLS proxy mode and the Secure session cookie must match';
     }
+}
+if ($auth_remote_user === true && $container_tls_proxy !== true) {
+    $errors[] = 'REMOTE_USER authentication requires HTTPS-only mode';
 }
 $requiredSessionSettings = array(
     'session.use_only_cookies' => '1',

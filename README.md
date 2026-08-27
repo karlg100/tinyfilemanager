@@ -32,7 +32,9 @@ Tinyfilemanager is highly documented on the [wiki pages](https://github.com/pras
 ## Containers
 
 The maintained Apache/PHP container, Compose file, and quick start are in
-[`contrib/container`](contrib/container/README.md).
+[`contrib/container`](contrib/container/README.md). The optional
+[`contrib/haproxy`](contrib/haproxy/README.md) stack adds TLS and AD Kerberos
+sign-on.
 
 ## How to use
 

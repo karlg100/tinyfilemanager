@@ -130,6 +130,18 @@ For a TLS reverse proxy, set `$container_tls_proxy = true` so session cookies
 are marked `Secure`. Keep the container port on loopback, and configure the
 proxy to replace rather than append forwarded headers.
 
+### TLS with AD/GSSAPI
+
+The optional [`contrib/haproxy`](../haproxy/README.md) stack provides HTTPS and
+AD Kerberos sign-on. It enables `$auth_remote_user` and accepts only Apache's
+server-owned `REMOTE_USER` after Apache has authenticated and authorized the
+request. Never translate a browser-supplied `Remote-User`, `X-Remote-User`, or
+similar HTTP header into `REMOTE_USER`.
+
+No user credential is passed to Tiny File Manager. PHP receives only the
+realm-qualified principal name; `gssproxy` keeps the HTTP service keytab in a
+separate container, and local-password fallback is disabled.
+
 ## Start with a Docker-managed volume
 
 Use this mode only when `TFM_DATA_PATH` is not being used:

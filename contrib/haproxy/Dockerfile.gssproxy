@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+
+ARG DEBIAN_IMAGE=debian:bookworm-20260824-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM ${DEBIAN_IMAGE}
+
+LABEL org.opencontainers.image.title="Tiny File Manager gssproxy" \
+      org.opencontainers.image.description="Isolated GSSAPI credential service for Tiny File Manager" \
+      org.opencontainers.image.source="https://github.com/prasathmani/tinyfilemanager" \
+      org.opencontainers.image.lifecycle="trusted-intranet-non-production"
+
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gssproxy=0.9.1-1+b1 \
+      krb5-user=1.20.1-2+deb12u5; \
+    rm -rf /var/lib/apt/lists/* /etc/gssproxy/*; \
+    groupadd --system --gid 991 gssproxy; \
+    useradd --system --uid 991 --gid gssproxy --home-dir /nonexistent \
+      --shell /usr/sbin/nologin gssproxy
+
+COPY contrib/haproxy/gssproxy.conf.template /etc/gssproxy/gssproxy.conf.template
+COPY contrib/haproxy/gssproxy-entrypoint /usr/local/bin/gssproxy-entrypoint
+COPY contrib/haproxy/gssproxy-healthcheck /usr/local/bin/gssproxy-healthcheck
+
+RUN set -eux; \
+    chown root:root \
+      /etc/gssproxy/gssproxy.conf.template \
+      /usr/local/bin/gssproxy-entrypoint \
+      /usr/local/bin/gssproxy-healthcheck; \
+    chmod 0444 /etc/gssproxy/gssproxy.conf.template; \
+    chmod 0555 \
+      /usr/local/bin/gssproxy-entrypoint \
+      /usr/local/bin/gssproxy-healthcheck; \
+    /usr/sbin/gssproxy --version
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD ["/usr/local/bin/gssproxy-healthcheck"]
+
+ENTRYPOINT ["/usr/local/bin/gssproxy-entrypoint"]
+CMD ["/usr/sbin/gssproxy", "--interactive", "--config=/run/gssproxy-private/gssproxy.conf", "--socket=/run/gssproxy-shared/tinyfilemanager.sock"]

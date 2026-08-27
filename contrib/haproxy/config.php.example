@@ -1,0 +1,35 @@
+<?php
+
+// Keep redirects relative and independent of request Host headers.
+define('FM_SELF_URL', '/index.php');
+define('FM_ROOT_URL', '');
+
+// Apache validates Kerberos and the explicit principal allowlist on every
+// request, then supplies server-owned REMOTE_USER. It does not pass a password,
+// ticket, keytab, or browser-provided identity header to PHP.
+$use_auth = true;
+$auth_remote_user = true;
+$auth_users = array();
+
+// Use full principals such as user@EXAMPLE.COM when applying read-only policy.
+$readonly_users = array();
+$directories_users = array();
+$global_readonly = false;
+
+$root_path = '/srv/tinyfilemanager/data';
+$root_url = '';
+$path_display_mode = 'relative';
+
+$default_timezone = 'Etc/UTC';
+$max_upload_size_bytes = 268435456; // 256 MiB
+$upload_chunk_size_bytes = 2097152; // 2 MiB
+
+// Apache terminates the browser's TLS connection in this stack.
+$container_tls_proxy = true;
+ini_set('session.cookie_secure', '1');
+
+$online_viewer = false;
+$settings_enabled = false;
+$direct_links_enabled = false;
+$raw_previews_enabled = false;
+$url_upload_enabled = false;

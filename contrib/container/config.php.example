@@ -10,6 +10,7 @@ $auth_users = array(
 );
 
 $use_auth = true;
+$auth_remote_user = false;
 $readonly_users = array();
 $directories_users = array();
 $global_readonly = false;

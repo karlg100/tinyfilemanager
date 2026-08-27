@@ -1,0 +1,6 @@
+**
+!contrib/
+!contrib/haproxy/
+!contrib/haproxy/gssproxy.conf.template
+!contrib/haproxy/gssproxy-entrypoint
+!contrib/haproxy/gssproxy-healthcheck

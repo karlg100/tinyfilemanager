@@ -1,0 +1,15 @@
+/.env
+/authorized-users
+/config.php
+/http.keytab
+/krb5.conf
+/tls.crt
+/tls.key
+/*.ccache
+/*.crt
+/*.key
+/*.keytab
+/*.p12
+/*.pem
+/*.pfx
+/krb5cc_*

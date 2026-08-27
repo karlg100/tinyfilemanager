@@ -1,0 +1,17 @@
+[gssproxy]
+debug_level = 0
+run_as_user = gssproxy
+
+[service/tinyfilemanager-http]
+mechs = krb5
+cred_usage = accept
+cred_store = keytab:/run/gssproxy-private/http.keytab
+krb5_principal = HTTP/__TFM_PUBLIC_HOST__@__TFM_AD_REALM__
+euid = 33
+allow_any_uid = false
+allow_protocol_transition = false
+allow_constrained_delegation = false
+allow_client_ccache_sync = false
+trusted = false
+impersonate = false
+filter_flags = +DELEGATE

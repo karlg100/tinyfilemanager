@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+pidof gssproxy > /dev/null
+test -S /run/gssproxy-shared/tinyfilemanager.sock
+runuser -u gssproxy -- test -r /run/gssproxy-private/http.keytab

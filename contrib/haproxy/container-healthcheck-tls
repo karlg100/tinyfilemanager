@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+exec runuser -u www-data -- php -r '
+$proxy = @stream_socket_client(
+    "unix:///run/gssproxy-shared/tinyfilemanager.sock",
+    $proxyErrorCode, $proxyErrorMessage, 2);
+if ($proxy === false) {
+    exit(1);
+}
+fclose($proxy);
+
+$host = getenv("TFM_PUBLIC_HOST");
+if (!is_string($host) || $host === "") {
+    exit(1);
+}
+$context = stream_context_create(array("ssl" => array(
+    "peer_name" => $host,
+    "verify_peer" => false,
+    "verify_peer_name" => false,
+)));
+$socket = @stream_socket_client(
+    "tls://127.0.0.1:8443", $errorCode, $errorMessage, 2,
+    STREAM_CLIENT_CONNECT, $context);
+if ($socket === false) {
+    exit(1);
+}
+fwrite($socket, "GET /healthz.php HTTP/1.0\r\nHost: " . $host
+    . "\r\nConnection: close\r\n\r\n");
+$status = fgets($socket);
+fclose($socket);
+exit(is_string($status) && preg_match("~^HTTP/[0-9.]+ 204 ~", $status) ? 0 : 1);
+'

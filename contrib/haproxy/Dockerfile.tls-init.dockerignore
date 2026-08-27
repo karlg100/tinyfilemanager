@@ -1,0 +1,4 @@
+**
+!contrib/
+!contrib/haproxy/
+!contrib/haproxy/tls-secrets-init
