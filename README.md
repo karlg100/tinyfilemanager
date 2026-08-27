@@ -34,7 +34,8 @@ Tinyfilemanager is highly documented on the [wiki pages](https://github.com/pras
 The maintained Apache/PHP container, Compose file, and quick start are in
 [`contrib/container`](contrib/container/README.md). The optional
 [`contrib/haproxy`](contrib/haproxy/README.md) stack adds TLS and AD Kerberos
-sign-on.
+sign-on. AFS is not included; [`AFSSUPPORT.md`](AFSSUPPORT.md) documents the
+requirements for a separate implementation after the HAProxy stack is working.
 
 ## How to use
 

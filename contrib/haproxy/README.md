@@ -20,6 +20,13 @@ The keytab is confined to `gssproxy`; PHP cannot read it. Delegation, Basic
 authentication, NTLM, protocol transition, and local-password fallback are
 disabled.
 
+`REMOTE_USER` is an identity string, not an AFS credential. Finish this guide
+and validate a real Kerberos browser sign-on before considering the separate
+[AFS and mod_waklog integration requirements](../../AFSSUPPORT.md). That guide
+describes a separate implementation with a different credential path and
+child image; binding `/afs` into the supplied container does not provide
+per-user AFS access.
+
 ## Requirements
 
 - A current Docker Engine on Linux, or Docker Desktop using Linux containers

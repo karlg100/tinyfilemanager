@@ -75,6 +75,11 @@ dedicated, unshared host directory with the supplied Compose override. Choose
 this mode instead of the Docker-managed volume described below; do not mix the
 commands for the two modes.
 
+An AFS mount is not an ordinary host directory. Do not apply the UID,
+ownership, ACL, or SELinux-relabel procedure below to AFS. After the HAProxy
+stack is working, see the separate
+[AFS integration requirements](../../AFSSUPPORT.md).
+
 Linux:
 
 These UID commands assume rootful Docker. With rootless or
