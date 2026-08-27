@@ -93,8 +93,10 @@ services:
           create_host_path: false
           selinux: z
       - type: bind
-        source: ${TFM_KEYTAB_PATH:-./http.keytab}
-        target: /run/secrets-source/http.keytab
+        # Mount the dedicated directory so an atomic keytab replacement on
+        # the host is visible before the gssproxy container is restarted.
+        source: ${TFM_KEYTAB_DIR:-./keytab}
+        target: /run/secrets-source
         read_only: true
         bind:
           create_host_path: false

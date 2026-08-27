@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch the AD host keytab for Tiny File Manager HTTP key changes
+ConditionPathExists=/etc/krb5.keytab
+
+[Path]
+PathChanged=/etc/krb5.keytab
+Unit=tinyfilemanager-keytab-sync.service
+
+[Install]
+WantedBy=paths.target

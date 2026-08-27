@@ -5,6 +5,7 @@
 /contrib/haproxy/authorized-users
 /contrib/haproxy/config.php
 /contrib/haproxy/http.keytab
+/contrib/haproxy/keytab/
 /contrib/haproxy/krb5.conf
 /contrib/haproxy/tls.crt
 /contrib/haproxy/tls.key

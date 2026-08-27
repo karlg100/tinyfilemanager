@@ -2,6 +2,7 @@
 /authorized-users
 /config.php
 /http.keytab
+/keytab/
 /krb5.conf
 /tls.crt
 /tls.key

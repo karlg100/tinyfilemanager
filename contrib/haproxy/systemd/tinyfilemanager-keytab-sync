@@ -1,0 +1,504 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+
+readonly program=${0##*/}
+readonly source_keytab=/etc/krb5.keytab
+readonly state_dir=/var/lib/tinyfilemanager-keytab
+readonly export_dir=${state_dir}/keytabs
+readonly output_keytab=${export_dir}/http.keytab
+readonly applied_digest_file=${state_dir}/applied.sha256
+readonly apache_digest_file=${state_dir}/apache-restarted.sha256
+readonly runtime_dir=/run/tinyfilemanager-keytab-sync
+readonly export_only=${1:-}
+published_tmp=
+
+fail() {
+    printf '%s: %s\n' "$program" "$1" >&2
+    exit 1
+}
+
+log() {
+    printf '%s: %s\n' "$program" "$1"
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
+
+private_root_path() {
+    local path=$1
+    local kind=$2
+    local uid mode
+
+    [ ! -L "$path" ] || fail "$path must not be a symlink"
+    [ "$(realpath -e -- "$path")" = "$path" ] \
+        || fail "$path and its parents must not be symlinks"
+    case "$kind" in
+        file) [ -f "$path" ] || fail "$path must be a regular file" ;;
+        directory) [ -d "$path" ] || fail "$path must be a directory" ;;
+        *) fail 'internal path-type error' ;;
+    esac
+    uid=$(stat -Lc '%u' -- "$path")
+    mode=$(stat -Lc '%a' -- "$path")
+    [ "$uid" = 0 ] || fail "$path must be owned by root"
+    (( (8#$mode & 0077) == 0 )) || fail "$path must not be accessible by group or others"
+}
+
+cleanup() {
+    [ -z "$published_tmp" ] || rm -f -- "$published_tmp"
+    [ ! -d "$runtime_dir" ] || rm -f -- \
+        "$runtime_dir/host.keytab" \
+        "$runtime_dir/host.final.keytab" \
+        "$runtime_dir/http.keytab" \
+        "$runtime_dir/keytab.list" \
+        "$runtime_dir/keytab.delete" \
+        "$runtime_dir/ktutil.commands"
+}
+
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+semantic_digest() {
+    local keytab=$1
+
+    {
+        printf 'rkt %s\n' "$keytab"
+        printf 'list -k -e\nquit\n'
+    } | ktutil 2>/dev/null \
+        | awk '
+            $1 ~ /^[0-9]+$/ {
+                found = 1
+                $1 = ""
+                sub(/^[[:space:]]+/, "")
+                print
+            }
+            END { if (!found) exit 1 }
+        ' \
+        | LC_ALL=C sort \
+        | sha256sum \
+        | awk '{print $1}'
+}
+
+snapshot_source() {
+    local snapshot=$1
+    local attempt fd_before fd_after path_after path_final
+
+    for attempt in 1 2 3; do
+        rm -f -- "$snapshot"
+        if ! exec 8<"$source_keytab"; then
+            sleep 1
+            continue
+        fi
+        if ! fd_before=$(stat -Lc '%d:%i:%s:%y:%z' /proc/self/fd/8) \
+            || ! cp -- /proc/self/fd/8 "$snapshot" \
+            || ! chmod 0600 "$snapshot" \
+            || ! fd_after=$(stat -Lc '%d:%i:%s:%y:%z' /proc/self/fd/8) \
+            || ! path_after=$(stat -Lc '%d:%i:%s:%y:%z' -- "$source_keytab"); then
+            exec 8<&-
+            sleep 1
+            continue
+        fi
+        if [ "$fd_before" = "$fd_after" ] \
+            && [ "$fd_after" = "$path_after" ] \
+            && cmp -s /proc/self/fd/8 "$snapshot"; then
+            if ! path_final=$(stat -Lc '%d:%i:%s:%y:%z' -- "$source_keytab"); then
+                exec 8<&-
+                sleep 1
+                continue
+            fi
+            exec 8<&-
+            if [ "$path_after" = "$path_final" ]; then
+                return 0
+            fi
+        else
+            exec 8<&-
+        fi
+        sleep 1
+    done
+    fail "$source_keytab changed while it was being read; retry later"
+}
+
+require_source_unchanged() {
+    local original_snapshot=$1
+    local final_snapshot=$runtime_dir/host.final.keytab
+
+    snapshot_source "$final_snapshot"
+    cmp -s "$original_snapshot" "$final_snapshot" \
+        || fail "$source_keytab changed during synchronization; run again"
+}
+
+validate_source_freshness() {
+    local snapshot=$1
+    local http_principal=$2
+    local host_principal=$3
+
+    {
+        printf 'rkt %s\n' "$snapshot"
+        printf 'list -k -e\nquit\n'
+    } | ktutil 2>/dev/null | awk \
+        -v http="$http_principal" \
+        -v host="$host_principal" '
+        $1 ~ /^[0-9]+$/ {
+            kvno = $2 + 0
+            principal = $3
+            enctype = $4
+            key = $5
+            gsub(/[()]/, "", enctype)
+            gsub(/[()]/, "", key)
+            sub(/^DEPRECATED:/, "", enctype)
+            if (principal == http) {
+                if (kvno > http_max) {
+                    http_previous = http_max
+                    http_max = kvno
+                } else if (kvno < http_max && kvno > http_previous) {
+                    http_previous = kvno
+                }
+                if (enctype ~ /^aes(128|256)-/) {
+                    http_types[kvno SUBSEP enctype] = 1
+                    http_keys[kvno SUBSEP enctype SUBSEP key] = 1
+                }
+            }
+            if (principal == host) {
+                if (kvno > host_max) {
+                    host_previous = host_max
+                    host_max = kvno
+                } else if (kvno < host_max && kvno > host_previous) {
+                    host_previous = kvno
+                }
+                if (enctype ~ /^aes(128|256)-/) {
+                    host_types[kvno SUBSEP enctype] = 1
+                    host_keys[kvno SUBSEP enctype SUBSEP key] = 1
+                }
+            }
+        }
+        END {
+            if (!http_max || !host_max || http_max != host_max) exit 1
+            if (http_previous && http_previous != host_previous) exit 1
+            wanted[http_max] = 1
+            if (http_previous) wanted[http_previous] = 1
+            for (entry in host_types) {
+                split(entry, fields, SUBSEP)
+                if (fields[1] in wanted && !(entry in http_types)) exit 1
+                if (fields[1] == http_max) current_host_aes = 1
+                if (http_previous && fields[1] == http_previous) previous_host_aes = 1
+            }
+            for (entry in http_types) {
+                split(entry, fields, SUBSEP)
+                if (fields[1] in wanted && !(entry in host_types)) exit 1
+                if (fields[1] == http_max) current_http_aes = 1
+                if (http_previous && fields[1] == http_previous) previous_http_aes = 1
+            }
+            for (entry in host_keys) {
+                split(entry, fields, SUBSEP)
+                if (fields[1] in wanted && !(entry in http_keys)) exit 1
+            }
+            for (entry in http_keys) {
+                split(entry, fields, SUBSEP)
+                if (fields[1] in wanted && !(entry in host_keys)) exit 1
+            }
+            if (!current_host_aes || !current_http_aes) exit 1
+            if (http_previous && (!previous_host_aes || !previous_http_aes)) exit 1
+            print http_max
+            if (http_previous) print http_previous
+        }
+    ' || fail 'HTTP keys do not match the host current/previous KVNO and AES key sets'
+}
+
+filter_keytab() {
+    local snapshot=$1
+    local candidate=$2
+    local expected=$3
+    local validated_kvnos=$4
+    local listing=$runtime_dir/keytab.list
+    local deletions=$runtime_dir/keytab.delete
+    local commands=$runtime_dir/ktutil.commands
+
+    {
+        printf 'rkt %s\n' "$snapshot"
+        printf 'list -e\nquit\n'
+    } | ktutil >"$listing"
+
+    if ! awk -v expected="$expected" -v keep="$validated_kvnos" '
+        BEGIN {
+            count = split(keep, kvnos)
+            for (position = 1; position <= count; position++) {
+                wanted[kvnos[position]] = 1
+            }
+        }
+        $1 ~ /^[0-9]+$/ {
+            slot = $1
+            kvno = $2
+            principal = $3
+            enctype = $0
+            sub(/^.*\(/, "", enctype)
+            sub(/\)[[:space:]]*$/, "", enctype)
+            sub(/^DEPRECATED:/, "", enctype)
+            if (principal == expected && (kvno in wanted) \
+                && enctype ~ /^aes(128|256)-/) {
+                kept++
+            } else {
+                print slot
+            }
+        }
+        END { if (!kept) exit 1 }
+    ' "$listing" | LC_ALL=C sort -rn >"$deletions"; then
+        fail 'the host keytab has no AES key for the expected HTTP principal'
+    fi
+
+    rm -f -- "$candidate"
+    {
+        printf 'rkt %s\n' "$snapshot"
+        while IFS= read -r slot; do
+            [ -n "$slot" ] && printf 'delent %s\n' "$slot"
+        done <"$deletions"
+        printf 'wkt %s\nquit\n' "$candidate"
+    } >"$commands"
+    ktutil <"$commands" >/dev/null
+    [ -s "$candidate" ] || fail 'ktutil did not create the filtered keytab'
+    chmod 0600 "$candidate"
+
+    klist -ke "$candidate" | awk -v expected="$expected" -v keep="$validated_kvnos" '
+        BEGIN {
+            count = split(keep, kvnos)
+            for (position = 1; position <= count; position++) {
+                wanted[kvnos[position]] = 1
+            }
+        }
+        $1 ~ /^[0-9]+$/ {
+            kvno = $1
+            principal = $2
+            enctype = $0
+            sub(/^.*\(/, "", enctype)
+            sub(/\)[[:space:]]*$/, "", enctype)
+            sub(/^DEPRECATED:/, "", enctype)
+            if (principal != expected || !(kvno in wanted) \
+                || enctype !~ /^aes(128|256)-/) bad = 1
+            found = 1
+        }
+        END { exit !(found && !bad) }
+    ' || fail 'filtered keytab validation failed'
+}
+
+publish_keytab() {
+    local candidate=$1
+    local candidate_digest=$2
+    local current_digest=
+
+    if [ -e "$output_keytab" ]; then
+        private_root_path "$output_keytab" file
+        if ! current_digest=$(semantic_digest "$output_keytab"); then
+            current_digest=
+            log 'replacing an invalid existing HTTP keytab'
+        fi
+    fi
+    if [ -n "$current_digest" ] && [ "$current_digest" = "$candidate_digest" ]; then
+        return 0
+    fi
+
+    published_tmp=$(mktemp "$export_dir/.http.keytab.XXXXXX")
+    install -o root -g root -m 0400 "$candidate" "$published_tmp"
+    if command -v getenforce >/dev/null 2>&1 \
+        && [ "$(getenforce)" != Disabled ]; then
+        chcon --reference="$export_dir" "$published_tmp"
+    fi
+    sync -f "$published_tmp"
+    mv -T -- "$published_tmp" "$output_keytab"
+    published_tmp=
+    sync -f "$export_dir"
+    log 'published a validated HTTP-only keytab'
+}
+
+container_ids() {
+    local service=$1
+    local running=$2
+    local args=(ps --filter "label=com.docker.compose.project=$TFM_PROJECT" \
+        --filter "label=com.docker.compose.service=$service" --format '{{.ID}}')
+
+    [ "$running" = yes ] || args=(ps -a --filter "label=com.docker.compose.project=$TFM_PROJECT" \
+        --filter "label=com.docker.compose.service=$service" --format '{{.ID}}')
+    docker "${args[@]}"
+}
+
+one_id_or_empty() {
+    local ids=$1
+    local service=$2
+    local count
+
+    count=$(awk 'NF { count++ } END { print count + 0 }' <<<"$ids")
+    [ "$count" -le 1 ] || fail "expected at most one running $service container"
+    awk 'NF { print; exit }' <<<"$ids"
+}
+
+wait_healthy() {
+    local id=$1
+    local service=$2
+    local status
+    local attempt
+
+    for ((attempt = 1; attempt <= 180; attempt++)); do
+        status=$(docker inspect --format \
+            '{{if not .State.Running}}stopped{{else if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+            "$id") || return 1
+        case "$status" in
+            healthy) return 0 ;;
+            stopped|missing) fail "$service stopped or has no healthcheck" ;;
+        esac
+        sleep 1
+    done
+    fail "$service did not become healthy"
+}
+
+write_state_digest() {
+    local destination=$1
+    local digest=$2
+    local marker_tmp
+
+    marker_tmp=$(mktemp "$state_dir/.applied.XXXXXX")
+    printf '%s\n' "$digest" >"$marker_tmp"
+    chmod 0600 "$marker_tmp"
+    mv -T -- "$marker_tmp" "$destination"
+    sync -f "$state_dir"
+}
+
+refresh_consumers() {
+    local expected_digest=$1
+    local source_snapshot=$2
+    local published_sha runtime_sha current_digest mount_info
+    local gss_running app_running haproxy_running gss_id app_id haproxy_id
+
+    export DOCKER_HOST=unix:///run/docker.sock
+    export DOCKER_CONFIG=$runtime_dir/docker-config
+    unset DOCKER_CONTEXT
+    install -d -m 0700 "$DOCKER_CONFIG"
+    [ -S /run/docker.sock ] || fail 'the rootful Docker socket is unavailable'
+    docker info >/dev/null
+
+    gss_running=$(container_ids gssproxy yes)
+    app_running=$(container_ids tinyfilemanager yes)
+    haproxy_running=$(container_ids haproxy yes)
+    gss_id=$(one_id_or_empty "$gss_running" gssproxy)
+    app_id=$(one_id_or_empty "$app_running" tinyfilemanager)
+    haproxy_id=$(one_id_or_empty "$haproxy_running" haproxy)
+
+    if [ -z "$gss_id" ] && [ -z "$app_id" ] && [ -z "$haproxy_id" ]; then
+        require_source_unchanged "$source_snapshot"
+        write_state_digest "$applied_digest_file" "$expected_digest"
+        log 'the stack is stopped; the next normal start will load the keytab'
+        return 0
+    fi
+    [ -n "$gss_id" ] || fail 'the stack is partially running without gssproxy'
+
+    mount_info=$(docker inspect --format \
+        '{{range .Mounts}}{{if eq .Destination "/run/secrets-source"}}{{.Type}}|{{.Source}}|{{.RW}}{{end}}{{end}}' \
+        "$gss_id")
+    [ "$mount_info" = "bind|$export_dir|false" ] \
+        || fail 'gssproxy is not using the configured read-only keytab directory'
+
+    require_source_unchanged "$source_snapshot"
+    published_sha=$(sha256sum "$output_keytab" | awk '{print $1}')
+    runtime_sha=$(docker exec "$gss_id" sha256sum /run/gssproxy-private/http.keytab 2>/dev/null \
+        | awk 'NR == 1 {print $1}') || true
+
+    if [ -r "$applied_digest_file" ] \
+        && [ "$(cat "$applied_digest_file")" = "$expected_digest" ] \
+        && [ "$runtime_sha" = "$published_sha" ]; then
+        require_source_unchanged "$source_snapshot"
+        return 0
+    fi
+
+    if [ "$runtime_sha" != "$published_sha" ]; then
+        docker restart --timeout 20 "$gss_id" >/dev/null
+        wait_healthy "$gss_id" gssproxy
+        runtime_sha=$(docker exec "$gss_id" sha256sum /run/gssproxy-private/http.keytab \
+            | awk 'NR == 1 {print $1}')
+        [ "$runtime_sha" = "$published_sha" ] \
+            || fail 'gssproxy did not load the published keytab'
+    else
+        wait_healthy "$gss_id" gssproxy
+    fi
+
+    if [ -n "$app_id" ]; then
+        if [ ! -r "$apache_digest_file" ] \
+            || [ "$(cat "$apache_digest_file")" != "$expected_digest" ]; then
+            docker restart --timeout 20 "$app_id" >/dev/null
+            write_state_digest "$apache_digest_file" "$expected_digest"
+        fi
+        wait_healthy "$app_id" tinyfilemanager
+    fi
+    [ -z "$haproxy_id" ] || wait_healthy "$haproxy_id" haproxy
+
+    current_digest=$(semantic_digest "$output_keytab")
+    [ "$current_digest" = "$expected_digest" ] \
+        || fail 'the published keytab changed during container refresh'
+    require_source_unchanged "$source_snapshot"
+    write_state_digest "$applied_digest_file" "$expected_digest"
+    log 'loaded the new keytab into gssproxy and Apache'
+}
+
+main() {
+    local public_host=${TFM_PUBLIC_HOST:-}
+    local ad_host=${TFM_AD_HOST_FQDN:-}
+    local realm=${TFM_AD_REALM:-}
+    local project=${TFM_PROJECT:-}
+    local snapshot=$runtime_dir/host.keytab
+    local candidate=$runtime_dir/http.keytab
+    local http_principal host_principal digest validated_kvnos
+    local command
+
+    [ "$#" -le 1 ] || fail 'usage: tinyfilemanager-keytab-sync [--export-only]'
+    [ "$export_only" = '' ] || [ "$export_only" = '--export-only' ] \
+        || fail 'usage: tinyfilemanager-keytab-sync [--export-only]'
+    [ "$(id -u)" = 0 ] || fail 'must run as root'
+    if ! [[ "$public_host" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] \
+        || [[ "$public_host" == *..* ]]; then
+        fail 'TFM_PUBLIC_HOST must be a lowercase DNS hostname'
+    fi
+    if ! [[ "$ad_host" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] \
+        || [[ "$ad_host" == *..* ]]; then
+        fail 'TFM_AD_HOST_FQDN must be the lowercase joined-host FQDN'
+    fi
+    if ! [[ "$realm" =~ ^[A-Z0-9]([A-Z0-9.-]*[A-Z0-9])?$ ]] \
+        || [[ "$realm" == *..* ]]; then
+        fail 'TFM_AD_REALM must be an uppercase Kerberos realm'
+    fi
+    [[ "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+        || fail 'TFM_PROJECT must be a lowercase Compose project name'
+
+    for command in awk cmp cp flock install klist ktutil mktemp mv realpath sha256sum sort stat sync; do
+        require_command "$command"
+    done
+    [ "$export_only" = '--export-only' ] || require_command docker
+    [ -d "$runtime_dir" ] || install -d -o root -g root -m 0700 "$runtime_dir"
+    [ -d "$state_dir" ] || install -d -o root -g root -m 0700 "$state_dir"
+    [ -d "$export_dir" ] || install -d -o root -g root -m 0700 "$export_dir"
+    private_root_path "$runtime_dir" directory
+    private_root_path "$state_dir" directory
+    private_root_path "$export_dir" directory
+    private_root_path "$source_keytab" file
+
+    exec 9>"$runtime_dir/sync.lock"
+    flock -n 9 || fail 'another keytab sync is running'
+    rm -f -- "$runtime_dir/keytab.list" "$runtime_dir/keytab.delete" \
+        "$runtime_dir/ktutil.commands" "$snapshot" "$candidate"
+
+    http_principal="HTTP/${public_host}@${realm}"
+    host_principal="host/${ad_host}@${realm}"
+    snapshot_source "$snapshot"
+    validated_kvnos=$(validate_source_freshness \
+        "$snapshot" "$http_principal" "$host_principal")
+    filter_keytab "$snapshot" "$candidate" "$http_principal" "$validated_kvnos"
+    digest=$(semantic_digest "$candidate")
+    require_source_unchanged "$snapshot"
+    publish_keytab "$candidate" "$digest"
+    private_root_path "$output_keytab" file
+
+    if [ "$export_only" = '--export-only' ]; then
+        log 'export-only mode did not refresh containers'
+        return 0
+    fi
+    refresh_consumers "$digest" "$snapshot"
+}
+
+main "$@"

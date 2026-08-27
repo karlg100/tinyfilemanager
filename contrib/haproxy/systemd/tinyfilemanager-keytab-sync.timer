@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile the Tiny File Manager HTTP keytab
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=1h
+RandomizedDelaySec=5min
+Unit=tinyfilemanager-keytab-sync.service
+
+[Install]
+WantedBy=timers.target

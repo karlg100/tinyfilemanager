@@ -14,3 +14,4 @@ contrib/haproxy/gssproxy-entrypoint text eol=lf
 contrib/haproxy/gssproxy-healthcheck text eol=lf
 contrib/haproxy/haproxy-healthcheck text eol=lf
 contrib/haproxy/tls-secrets-init text eol=lf
+contrib/haproxy/systemd/* text eol=lf
