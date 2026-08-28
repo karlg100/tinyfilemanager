@@ -74,7 +74,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 FROM ${PHP_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.title="Tiny File Manager AFS profile" \
-      org.opencontainers.image.description="Direct-delegation OpenAFS profile for Tiny File Manager" \
+      org.opencontainers.image.description="Direct-delegation AFS profile using the OpenAFS 1.8 ABI" \
       org.opencontainers.image.source="https://github.com/prasathmani/tinyfilemanager" \
       org.opencontainers.image.lifecycle="trusted-intranet-non-production"
 

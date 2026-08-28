@@ -85,7 +85,7 @@ services:
     environment:
       TFM_PUBLIC_HOST: "${TFM_PUBLIC_HOST:?Set the certificate and HTTP SPN hostname}"
       TFM_AD_REALM: "${TFM_AD_REALM:?Set the uppercase HTTP Kerberos realm}"
-      TFM_AFS_CELL: "${TFM_AFS_CELL:?Set the lowercase OpenAFS cell}"
+      TFM_AFS_CELL: "${TFM_AFS_CELL:?Set the lowercase AFS cell}"
       TFM_AFS_REALM: "${TFM_AFS_REALM:?Set the uppercase AFS Kerberos realm}"
       TFM_DELEG_CCACHE_DIR: /run/tinyfilemanager-auth/clientcaches
       KRB5RCACHEDIR: /run/tinyfilemanager-auth/rcache

@@ -1,7 +1,8 @@
 # AFS implementation and security requirements
 
-> **Status:** [`README.md`](README.md) supplies a separate, pinned OpenAFS
-> prototype and deployment recipe. It remains a trusted-intranet,
+> **Status:** [`README.md`](README.md) supplies a separate, pinned AFS
+> prototype and deployment recipe built against the OpenAFS 1.8 userspace ABI.
+> It remains a trusted-intranet,
 > non-production profile until the documented live browser/KDC/AFS gate passes
 > on the target environment.
 
@@ -10,9 +11,13 @@ Add this layer only after the
 Manager—is healthy and a real Kerberos browser sign-on has passed. Do not
 modify or replace the working deployment while developing the AFS layer.
 
-At a glance: the AFS layer is Linux/OpenAFS-only, a bind mount alone is
-insufficient, per-user access requires full browser delegation, and the
-supplied profile still requires target-site acceptance testing.
+At a glance: the AFS layer is Linux-only, a bind mount alone is insufficient,
+per-user access requires full browser delegation, and the supplied
+OpenAFS-linked profile still requires target-site acceptance testing. It can
+potentially interoperate with AuriStorFS servers only through their documented
+OpenAFS-client/RxKAD path and its security and data-model restrictions; native
+AuriStorFS/YFS and rxgk are separate provider targets and are not supplied
+here.
 
 ## Keep the deployment layered
 
@@ -177,6 +182,16 @@ that unmodified `mod_waklog` can consume directly with libkrb5; see the pinned
 [gssproxy credential-storage source](https://github.com/gssapi/gssproxy/blob/675b592d74c66f5fae5285926d00e6d0cec70e43/src/mechglue/gpp_creds.c#L137-L228).
 
 ## How the separate AFS image is built
+
+The supplied image specifically builds against Debian's OpenAFS 1.8.9
+userspace ABI and expects an OpenAFS host Cache Manager. An AuriStorFS server is
+within scope only through its documented OpenAFS-client/RxKAD interoperability
+path. That path must not require RxGK, keyed Cache Managers, combined tokens,
+AES-256/SHA-1 wire privacy, or data semantics hidden from an OpenAFS client;
+the operator guide makes these target-subtree restrictions an explicit gate. A
+native AuriStorFS Cache Manager uses different provider libraries,
+configuration, mount type, and web-module integration; it requires a separate
+image and the same isolation and live-validation gates.
 
 The supplied multi-stage build pins the base image by digest, module sources by
 checksum, and its security-relevant Debian ABI packages by version. Generic
@@ -406,5 +421,9 @@ operator cannot silently switch storage backends.
 - [OpenAFS user authentication and PAGs](https://docs.openafs.org/UserGuide/HDRWQ20.html)
 - [Debian source for the pinned OpenAFS 1.8.9 packages](https://sources.debian.org/src/openafs/1.8.9-1%2Bdeb12u1/)
 - [OpenAFS security advisories](https://openafs.org/frameless/security/)
+- [AuriStorFS migration and AFS3 compatibility](https://www.auristor.com/documentation/man/linux/7/auristor_migration.html)
+- [AuriStorFS deployment interoperability matrix](https://www.auristor.com/openafs/migrate-to-auristor/auristor-deployment-strategy)
+- [AuriStorFS `asetkey` documentation](https://www.auristor.com/documentation/man/linux/8/asetkey.html)
+- [AuriStorFS `fs getcrypt` and RxKAD/FCRYPT limits](https://www.auristor.com/documentation/man/linux/1/fs_getcrypt.html)
 - [Apache prefork MPM](https://httpd.apache.org/docs/current/en/mod/prefork.html)
 - [Docker bind-mount behavior](https://docs.docker.com/engine/storage/bind-mounts/)

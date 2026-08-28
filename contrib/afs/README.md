@@ -1,17 +1,17 @@
-# OpenAFS container profile
+# AFS container profile (OpenAFS 1.8 implementation)
 
 This is the final, optional layer after the
 [`contrib/haproxy`](../haproxy/README.md) stack is healthy and a real browser
 Kerberos sign-on succeeds. It replaces that stack with a separately named,
 standalone HAProxy + Apache profile that converts a delegated user credential
-into a per-request OpenAFS token:
+into a per-request AFS token:
 
 ```text
 browser -- TLS + delegated Negotiate --> HAProxy -- TCP --> Apache
                                                             | native FILE cache
                                                      patched mod_waklog
                                                             | PAG + token
-                                                     host OpenAFS mount
+                                                     host AFS mount
 ```
 
 > **Deployment gate:** the base image digest and module-source checksums are
@@ -26,9 +26,37 @@ browser -- TLS + delegated Negotiate --> HAProxy -- TCP --> Apache
 [`sources.lock`](sources.lock) records the source, package, and ABI inputs; the
 runtime image carries that manifest and the patch checksums for inspection.
 
-The supplied prototype assumes one rootful Linux Docker host, one container
-replica, a host-managed OpenAFS 1.8 Cache Manager, rxkad-k5, Apache
-prefork/mod_php, and HTTP/1.1. Docker Desktop,
+### Provider scope
+
+This guide uses **AFS** as the family name. The supplied image is specifically
+built against the OpenAFS 1.8 userspace ABI and installs rxkad-k5 tokens through
+an OpenAFS Cache Manager on the Linux host.
+
+| Deployment | Status |
+| --- | --- |
+| OpenAFS 1.8 Cache Manager and OpenAFS servers using rxkad-k5 | Supplied implementation target; the live gate below is still required. |
+| OpenAFS 1.8 Cache Manager and AuriStorFS servers that permit OpenAFS-client/RxKAD interoperability | Potential interoperability path; the AuriStor administrator must validate every restriction below, and the live gate is mandatory. |
+| Native AuriStorFS/YFS Cache Manager, `yfs-rxgk`/rxgk, or AuriStor-only semantics | Not supplied by this image; requires a separate provider-specific build and validation. |
+
+See AuriStor's [migration guide](https://www.auristor.com/documentation/man/linux/7/auristor_migration.html)
+and [deployment strategy](https://www.auristor.com/openafs/migrate-to-auristor/auristor-deployment-strategy)
+for the OpenAFS-client interoperability boundary. For this path:
+
+- the AuriStor Location, Protection, and File services must not require RxGK,
+  keyed Cache Managers, combined tokens, or AES-256/SHA-1 wire privacy; and
+- the selected subtree must not depend on per-object ACLs, oversized volume
+  IDs or directories, extended attributes, or alternate data streams hidden
+  from an OpenAFS client, read-write replicas, directory ACL inheritance,
+  mandatory locks, or other AuriStor-only semantics. Deleting a visible object
+  can also delete hidden extended attributes or alternate data streams.
+
+Have the AuriStor administrator approve the exact subtree and security policy
+before testing. Renaming a provider or accepting an `auristorfs` mount would
+not make this OpenAFS-linked module compatible with a native AuriStorFS Cache
+Manager.
+
+The prototype otherwise assumes one rootful Linux Docker host, one container
+replica, rxkad-k5, Apache prefork/mod_php, and HTTP/1.1. Docker Desktop,
 rootless/user-namespace-remapped Docker, rxgk, and a Cache Manager inside the
 container are not supported.
 
@@ -60,7 +88,7 @@ suitable only for a browser running on the Docker host or an explicit local
 tunnel. For a managed test endpoint, bind the host's LAN address and allow only
 the test-client subnet through the host firewall.
 
-## 2. Prepare OpenAFS
+## 2. Prepare AFS
 
 The AFS administrator must complete these server-side prerequisites:
 
@@ -78,14 +106,26 @@ The AFS administrator must complete these server-side prerequisites:
   place this service keytab in this repository or any web container. Follow
   the OpenAFS [`asetkey` documentation](https://manpages.debian.org/testing/openafs-krb5/asetkey.8.en.html)
   and preserve the previous key during a coordinated rotation.
+- For AuriStorFS servers used through OpenAFS-client/RxKAD interoperability,
+  have the AuriStor administrator confirm that the relevant Location,
+  Protection, and File services remain available to OpenAFS clients, then
+  install the same `afs/<cell>@REALM` rxkad_krb5 keys with the vendor `asetkey` in
+  `/etc/yfs/server/KeyFileExt` on every relevant service host, directly or with
+  the vendor's Update Server. Native `yfs-rxgk` may coexist, but this profile
+  does not consume it and the servers must not require it from this client.
+  Follow the AuriStor
+  [`asetkey` documentation](https://www.auristor.com/documentation/man/linux/8/asetkey.html)
+  and migration guide, and preserve the previous key during rotation.
 - Every user has the intended Kerberos-to-PTS mapping and only the required
   AFS ACLs. Do not grant broad `system:anyuser` access to make startup pass.
 - DNS, clocks, realm trust/capaths, cell configuration, and the container
   host's KDC reachability are correct.
 
 Install and start the distribution-supported OpenAFS 1.8 client on the Docker
-host. Select a new, dedicated, symlink-free test subtree; do not start with
-production data. Verify the host credential path before involving Docker:
+host. This is also the client used for the documented AuriStorFS OpenAFS/RxKAD
+interoperability path; a native AuriStorFS Cache Manager is not consumed by
+this image. Select a new, dedicated, symlink-free test subtree; do not start
+with production data. Verify the host credential path before involving Docker:
 
 ```sh
 findmnt -T "$TFM_AFS_SOURCE" -o TARGET,SOURCE,FSTYPE,OPTIONS
@@ -93,6 +133,7 @@ test "$(findmnt -T "$TFM_AFS_SOURCE" -n -o FSTYPE)" = afs
 test -d "$TFM_AFS_SOURCE" && test ! -L "$TFM_AFS_SOURCE"
 test "$(fs whichcell -path "$TFM_AFS_SOURCE" | awk -F"'" 'NR == 1 {print $2}')" = "$TFM_AFS_CELL"
 fs examine -path "$TFM_AFS_SOURCE"
+fs getcrypt
 
 pagsh -c '
   cache_dir=$(mktemp -d /tmp/tfm-afs-k5.XXXXXX) || exit 1
@@ -109,6 +150,13 @@ pagsh -c '
 
 The disposable PAG and credential-cache directory prevent this preflight from
 destroying the operator's existing token or TGT.
+
+The AES enctypes in an rxkad-k5 service key protect Kerberos key material; they
+do not provide AuriStor AES-256 data-plane security. This client uses
+RxKAD/FCRYPT. `fs getcrypt` reports the Cache Manager default, while the token
+and server policy determine the actual connection; have the AFS administrator
+approve that wire-security boundary. See AuriStor's
+[`fs getcrypt` documentation](https://www.auristor.com/documentation/man/linux/1/fs_getcrypt.html).
 
 The Docker daemon must see the same mounted path. Mount only this subtree—not
 `/afs`. Confirm it contains no out-of-scope symlinks or AFS volume mount points.
@@ -260,7 +308,7 @@ sudo systemctl start tinyfilemanager-afs-keytab-sync.service
 ```
 
 Open `https://files.example.com:9443` from a configured test endpoint. The
-entrypoint fails closed for a missing OpenAFS mount, mismatched cell
+entrypoint fails closed for a missing AFS mount, mismatched cell
 configuration, wrong keytab, proxy-backed GSSAPI, non-prefork MPM, or invalid
 runtime configuration. The host-side `fs whichcell`/`fs examine` preflight is
 the authoritative check that the selected bind is the intended cell and

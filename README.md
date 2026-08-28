@@ -35,7 +35,9 @@ The maintained Apache/PHP container, Compose file, and quick start are in
 [`contrib/container`](contrib/container/README.md). The optional
 [`contrib/haproxy`](contrib/haproxy/README.md) stack adds TLS and AD Kerberos
 sign-on. The separate, Linux-only [`contrib/afs`](contrib/afs/README.md)
-prototype layers delegated OpenAFS access after the HAProxy stack is working.
+prototype layers delegated AFS access through an OpenAFS 1.8 host client after
+the HAProxy stack is working; its provider notes define the limited AuriStorFS
+server-interoperability boundary.
 
 ## How to use
 
