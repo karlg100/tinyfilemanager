@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+# check=skip=InvalidDefaultArgInFrom
+
+# This must name an operator-built private EL9 provider image by digest. The
+# provider image, licensed packages, repository credentials, and SDK are not
+# part of this public build context.
+ARG AURISTOR_PROVIDER_IMAGE
+FROM ${AURISTOR_PROVIDER_IMAGE} AS runtime
+
+ARG AURISTOR_PROVIDER_IMAGE
+
+LABEL org.opencontainers.image.title="Tiny File Manager native AuriStor profile" \
+      org.opencontainers.image.description="Private-provider assembly for delegated native AuriStor access" \
+      org.opencontainers.image.source="https://github.com/prasathmani/tinyfilemanager" \
+      org.opencontainers.image.lifecycle="trusted-intranet-non-production" \
+      org.opencontainers.image.vendor-inputs="private-not-redistributable"
+
+COPY contrib/afs/auristor-provider-verify /usr/local/bin/auristor-provider-verify
+
+RUN set -eu; \
+    case "$AURISTOR_PROVIDER_IMAGE" in \
+      *@sha256:*) ;; \
+      *) printf '%s\n' 'AURISTOR_PROVIDER_IMAGE must be pinned with @sha256' >&2; exit 1 ;; \
+    esac; \
+    provider_digest=${AURISTOR_PROVIDER_IMAGE##*@sha256:}; \
+    provider_name=${AURISTOR_PROVIDER_IMAGE%@sha256:*}; \
+    [ -n "$provider_name" ] && [ "${#provider_digest}" -eq 64 ]; \
+    case "$provider_digest" in *[!0-9a-f]*) exit 1 ;; esac; \
+    chmod 0555 /usr/local/bin/auristor-provider-verify; \
+    /usr/local/bin/auristor-provider-verify --build; \
+    cd /usr/share/tinyfilemanager-auristor; \
+    sha256sum provider.lock > provider.lock.sha256; \
+    chmod 0444 provider.lock.sha256
+
+COPY tinyfilemanager.php /var/www/html/index.php
+COPY translation.json /var/www/html/translation.json
+COPY LICENSE /usr/share/licenses/tinyfilemanager/LICENSE
+COPY contrib/container/apache.conf /etc/httpd/conf.d/tinyfilemanager-hardening.conf
+COPY contrib/afs/healthz-auristor.php /var/www/html/healthz.php
+COPY contrib/container/php.ini /usr/local/etc/php/conf.d/99-tinyfilemanager.ini
+COPY contrib/afs/validate-config.php /usr/local/lib/tinyfilemanager/validate-config.php
+COPY contrib/afs/httpd-auristor.conf /etc/httpd/conf/tinyfilemanager.conf
+COPY contrib/afs/tinyfilemanager-auristor.conf /etc/httpd/conf.d/tinyfilemanager-auristor-vhosts.conf
+COPY contrib/afs/auristor-entrypoint /usr/local/bin/auristor-entrypoint
+COPY contrib/afs/auristor-healthcheck /usr/local/bin/auristor-healthcheck
+
+RUN set -eu; \
+    install -d -m 0755 \
+      /etc/yfs \
+      /run/policy \
+      /usr/local/lib/tinyfilemanager \
+      /usr/share/licenses/tinyfilemanager; \
+    rm -f /etc/krb5.conf /etc/yfs/yfs-client.conf; \
+    install -m 000 /dev/null /etc/krb5.conf; \
+    install -m 000 /dev/null /etc/yfs/yfs-client.conf; \
+    install -m 000 /dev/null /run/policy/authorized-users; \
+    install -m 000 /dev/null /var/www/html/config.php; \
+    chown -R root:root \
+      /var/www/html \
+      /usr/local/lib/tinyfilemanager \
+      /etc/httpd/conf/tinyfilemanager.conf \
+      /etc/httpd/conf.d/tinyfilemanager-hardening.conf \
+      /etc/httpd/conf.d/tinyfilemanager-auristor-vhosts.conf; \
+    find /var/www/html /usr/local/lib/tinyfilemanager -type d -exec chmod 0555 '{}' +; \
+    find /var/www/html /usr/local/lib/tinyfilemanager -type f ! -name config.php -exec chmod 0444 '{}' +; \
+    chmod 0444 \
+      /etc/httpd/conf/tinyfilemanager.conf \
+      /etc/httpd/conf.d/tinyfilemanager-hardening.conf \
+      /etc/httpd/conf.d/tinyfilemanager-auristor-vhosts.conf; \
+    chmod 0555 \
+      /usr/local/bin/auristor-entrypoint \
+      /usr/local/bin/auristor-healthcheck; \
+    /usr/local/bin/php -l /var/www/html/index.php; \
+    /usr/local/bin/php -l /var/www/html/healthz.php; \
+    /usr/local/bin/php -l /usr/local/lib/tinyfilemanager/validate-config.php; \
+    test ! -e /etc/openafs
+
+EXPOSE 8443
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["/usr/local/bin/auristor-healthcheck"]
+
+ENTRYPOINT ["/usr/local/bin/auristor-entrypoint"]
+CMD ["/usr/sbin/httpd", "-f", "/etc/httpd/conf/tinyfilemanager.conf", "-DFOREGROUND"]

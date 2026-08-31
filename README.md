@@ -34,10 +34,11 @@ Tinyfilemanager is highly documented on the [wiki pages](https://github.com/pras
 The maintained Apache/PHP container, Compose file, and quick start are in
 [`contrib/container`](contrib/container/README.md). The optional
 [`contrib/haproxy`](contrib/haproxy/README.md) stack adds TLS and AD Kerberos
-sign-on. The separate, Linux-only [`contrib/afs`](contrib/afs/README.md)
-prototype layers delegated AFS access through an OpenAFS 1.8 host client after
-the HAProxy stack is working; its provider notes define the limited AuriStorFS
-server-interoperability boundary.
+sign-on. The separate, Linux-only [`contrib/afs`](contrib/afs/README.md) layer
+documents two delegated-access providers after HAProxy is working: a supplied
+OpenAFS 1.8 container and a native AuriStor profile assembled from an
+operator-supplied private provider image. This repository distributes no
+AuriStor binaries; the operator must accept and follow the vendor license.
 
 ## How to use
 

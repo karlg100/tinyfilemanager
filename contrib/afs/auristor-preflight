@@ -1,0 +1,90 @@
+#!/bin/sh
+set -eu
+export LC_ALL=C
+
+fail() {
+    printf '%s\n' 'tinyfilemanager-auristor-preflight: native provider check failed' >&2
+    exit 1
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = --contract ]; then
+    printf '%s\n' 'tinyfilemanager-auristor-preflight-v1'
+    exit 0
+fi
+
+if [ "$#" -eq 1 ] && [ "$1" = --inner ] \
+    && [ "${TFM_AURISTOR_PREFLIGHT_INNER:-}" = 1 ]; then
+    [ -z "${KRB5CCNAME:-}" ] && [ -z "${KRB5_KTNAME:-}" ] || fail
+    [ -n "${TFM_AURISTOR_PREFLIGHT_MOUNT:-}" ] || fail
+    [ -n "${TFM_AURISTOR_PREFLIGHT_CELL:-}" ] || fail
+
+    token_output=$(/usr/bin/timeout 10 /usr/bin/tokens 2>/dev/null) || fail
+    printf '%s\n' "$token_output" | awk '
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*Tokens held by the Cache Manager:[[:space:]]*$/ {
+            headers++
+            next
+        }
+        /^[[:space:]]*--End of list--[[:space:]]*$/ {
+            endings++
+            next
+        }
+        { unexpected = 1 }
+        END { exit !(headers == 1 && endings == 1 && !unexpected) }
+    ' || fail
+
+    whichcell_output=$(/usr/bin/timeout 10 /usr/bin/fs whichcell \
+        -path "$TFM_AURISTOR_PREFLIGHT_MOUNT" 2>/dev/null) || fail
+    reported_cell=$(printf '%s\n' "$whichcell_output" \
+        | awk -F "'" 'NF >= 3 { print $(NF - 1); exit }')
+    [ "$reported_cell" = "$TFM_AURISTOR_PREFLIGHT_CELL" ] || fail
+
+    # fs getcrypt can return success even when no Cache Manager is present, so
+    # accept only its documented output. This still reports policy/default,
+    # not the wire security of a later authenticated request.
+    crypt_output=$(/usr/bin/timeout 10 /usr/bin/fs getcrypt 2>/dev/null) || fail
+    case "$crypt_output" in
+        'Security level is currently crypt (data security).'|\
+        'Security level is auth (data integrity).'|\
+        'Security level is currently clear.') ;;
+        *) fail ;;
+    esac
+    exit 0
+fi
+
+[ "$#" -eq 5 ] && [ "$1" = --startup ] || fail
+mount_path=$2
+config_path=$3
+cell=$4
+realm=$5
+
+[ "$mount_path" = /srv/tinyfilemanager/data ] || fail
+[ "$config_path" = /etc/yfs/yfs-client.conf ] || fail
+[ -d "$mount_path" ] && [ ! -L "$mount_path" ] || fail
+[ -s "$config_path" ] && [ -f "$config_path" ] \
+    && [ ! -L "$config_path" ] || fail
+[ -e /proc/fs/auristorfs/afs_ioctl ] || fail
+case "$cell" in
+    ''|.*|*.|*..*|*[!a-z0-9.-]*) fail ;;
+esac
+case "$realm" in
+    ''|.*|*.|*..*|*[!A-Z0-9.-]*) fail ;;
+esac
+
+for command_path in \
+    /usr/bin/fs /usr/bin/pagsh /usr/bin/tokens /usr/bin/timeout
+do
+    [ -x "$command_path" ] || fail
+done
+
+# The fixed executable starts inside a new PAG, verifies that it inherited no
+# token, and exits without acquiring one. No shell command text is accepted.
+TFM_AURISTOR_PREFLIGHT_INNER=1 \
+TFM_AURISTOR_PREFLIGHT_MOUNT=$mount_path \
+TFM_AURISTOR_PREFLIGHT_CELL=$cell \
+KRB5CCNAME= KRB5_KTNAME= \
+    SHELL=/usr/local/libexec/tinyfilemanager-auristor/provider-preflight \
+    /usr/bin/timeout 30 /usr/bin/pagsh --inner \
+      >/dev/null 2>&1 || fail
+
+exit 0

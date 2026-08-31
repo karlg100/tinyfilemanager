@@ -1,32 +1,60 @@
-# AFS container profile (OpenAFS 1.8 implementation)
+# AFS container profiles
 
 This is the final, optional layer after the
 [`contrib/haproxy`](../haproxy/README.md) stack is healthy and a real browser
-Kerberos sign-on succeeds. It replaces that stack with a separately named,
+Kerberos sign-on succeeds. Both provider options require a separately named,
 standalone HAProxy + Apache profile that converts a delegated user credential
 into a per-request AFS token:
 
 ```text
 browser -- TLS + delegated Negotiate --> HAProxy -- TCP --> Apache
                                                             | native FILE cache
-                                                     patched mod_waklog
+                                                   provider token module
                                                             | PAG + token
                                                      host AFS mount
 ```
 
-> **Deployment gate:** the base image digest and module-source checksums are
-> pinned, and the image has been built locally on arm64 and amd64. Debian
-> package mirrors remain live inputs, and this repository cannot perform your
-> AD, browser, KDC, PTS, or AFS-server tests.
-> Treat this as a trusted-intranet, non-production profile until every live
-> test in step 7 passes. Direct delegation exposes the HTTP keytab and live
-> delegated credentials to the Apache/PHP UID. Read
-> [`REQUIREMENTS.md`](REQUIREMENTS.md) before enabling it.
+> **Deployment gate:** Option 1 has pinned source checksums and a pinned base
+> image digest and has been built locally on arm64 and amd64. Debian package
+> mirrors remain live inputs. Option 2 supplies public assembly and runtime
+> checks, but it cannot be built without an operator-supplied, digest-pinned
+> private image containing the licensed native provider. A loopback-only local
+> registry keeps that image on one host; an approved private registry is
+> optional for multiple hosts. Neither option is established by an image
+> build: this repository cannot perform your AD,
+> browser, KDC, identity, Cache Manager, or file-server tests. Treat either as a
+> trusted-intranet, non-production profile until its complete live gate passes.
+> Direct delegation exposes the HTTP keytab and live delegated credentials to
+> the Apache/PHP UID. Read [`REQUIREMENTS.md`](REQUIREMENTS.md) first.
 
-[`sources.lock`](sources.lock) records the source, package, and ABI inputs; the
-runtime image carries that manifest and the patch checksums for inspection.
+## Option 1: OpenAFS 1.8
 
-### Provider scope
+This is the supplied and runnable implementation. It uses
+[`compose.yaml`](compose.yaml), the existing [`Dockerfile`](Dockerfile), an
+OpenAFS 1.8 Cache Manager on the Linux host, and an `afs` filesystem bind. The
+complete recipe is steps 1 through 8 below. Existing deployments and commands
+remain unchanged. See the short [OpenAFS provider summary](providers/openafs/README.md).
+
+[`sources.lock`](sources.lock) records this option's source, package, and ABI
+inputs; the runtime image carries that manifest and the patch checksums for
+inspection.
+
+## Option 2: native AuriStor
+
+This option is a separate native AuriStorFS/YFS provider for the exact
+version-1 EL9 provider contract and an `auristorfs` mount. The supplied
+private-provider Containerfile,
+`Dockerfile.auristor`, and `compose.auristor.yaml` assemble the service from
+operator-supplied offline licensed inputs. No AuriStor RPM, library, module, or
+image is included here or may enter public Git, CI, artifacts, or registries.
+
+Do not point Option 1 at an `auristorfs` mount, substitute AuriStor libraries
+into its image, or relabel an OpenAFS image. Follow the complete
+[native AuriStor recipe](providers/auristor/README.md); it includes the private
+provider-image contract, configuration, build, start, validation, and rollback
+steps.
+
+### Option 1 provider scope
 
 This guide uses **AFS** as the family name. The supplied image is specifically
 built against the OpenAFS 1.8 userspace ABI and installs rxkad-k5 tokens through
@@ -55,12 +83,15 @@ before testing. Renaming a provider or accepting an `auristorfs` mount would
 not make this OpenAFS-linked module compatible with a native AuriStorFS Cache
 Manager.
 
-The prototype otherwise assumes one rootful Linux Docker host, one container
+Option 1 otherwise assumes one rootful Linux Docker host, one container
 replica, rxkad-k5, Apache prefork/mod_php, and HTTP/1.1. Docker Desktop,
 rootless/user-namespace-remapped Docker, rxgk, and a Cache Manager inside the
 container are not supported.
 
-Run every command from the repository root. Replace every example name.
+Steps 1 through 8 below are the preserved Option 1 recipe. Run every command
+from the repository root and replace every example name. Option 2 has a
+separate recipe so provider-specific commands and rollback stay isolated. The
+endpoint section applies to both providers.
 
 ## 1. Prove the non-AFS stack first
 
@@ -88,7 +119,7 @@ suitable only for a browser running on the Docker host or an explicit local
 tunnel. For a managed test endpoint, bind the host's LAN address and allow only
 the test-client subnet through the host firewall.
 
-## 2. Prepare AFS
+## 2. Prepare OpenAFS (Option 1)
 
 The AFS administrator must complete these server-side prerequisites:
 
@@ -163,7 +194,7 @@ The Docker daemon must see the same mounted path. Mount only this subtree—not
 Do not run `chown`, `chmod`, POSIX ACL, or SELinux relabel commands on it. Tiny
 File Manager is not an AFS ACL editor.
 
-## 3. Create the runtime files
+## 3. Create the Option 1 runtime files
 
 Create only regular local files and directories; do not use symlinks, reparse
 points, or a shared/system directory:
@@ -258,7 +289,7 @@ The Linux host computer object owns the HTTP SPN in this option. Configure
 that object for delegation as described in the endpoint section. Never mount
 the full host keytab or use `ktpass` against the joined computer account.
 
-## 5. Check, build, and start
+## 5. Check, build, and start Option 1
 
 Reload the recorded AFS environment from the repository root:
 
@@ -319,7 +350,7 @@ challenge and that the private Apache/PHP endpoint responds. They do not touch
 AFS and cannot detect an inaccessible or stalled Cache Manager. Monitor the
 host Cache Manager and selected mount separately.
 
-## 6. What this profile changes
+## 6. What Option 1 changes
 
 This is not the non-AFS container with another bind mount:
 
@@ -346,7 +377,7 @@ operation-time AFS volume confinement. Use only a trusted, dedicated tree with
 no symlinks or nested volume mount points. That residual is one reason the
 profile remains non-production.
 
-## 7. Mandatory live validation
+## 7. Mandatory Option 1 live validation
 
 Use two test users with disjoint ACL canaries in the disposable subtree:
 
@@ -370,7 +401,7 @@ Use two test users with disjoint ACL canaries in the disposable subtree:
 
 Do not cut over until all six checks pass in the target environment.
 
-## 8. Rotation, cutover, and rollback
+## 8. Option 1 rotation, cutover, and rollback
 
 For Option A, copy the new keytab to a same-directory temporary file, rename it
 over `http.keytab`, then recreate the app:

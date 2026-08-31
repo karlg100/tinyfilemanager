@@ -1,0 +1,19 @@
+**
+
+!contrib/
+!contrib/afs/
+!contrib/afs/LICENSE.mod-auth-gssapi
+!contrib/afs/auristor-preflight
+!contrib/afs/auristor-provider-verify
+!contrib/afs/patches/
+!contrib/afs/patches/mod_auth_gssapi/
+!contrib/afs/patches/mod_auth_gssapi/0001-delegated-cache-contract.patch
+!contrib/afs/providers/
+!contrib/afs/providers/auristor/
+!contrib/afs/providers/auristor/Containerfile.provider
+!contrib/afs/providers/auristor/provider-disabled.conf
+!contrib/afs/providers/auristor/provider-enabled.conf
+!contrib/afs/providers/auristor/provider-global.conf
+
+# All RPMs, source archives, signing keys, credentials, and licensed inputs
+# arrive only through explicitly named BuildKit contexts.

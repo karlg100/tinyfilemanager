@@ -1,0 +1,163 @@
+name: ${TFM_AURISTOR_PROJECT:?Set TFM_AURISTOR_PROJECT to a unique Compose project name}
+
+services:
+  haproxy:
+    image: tinyfilemanager-auristor-haproxy:${TFM_AURISTOR_PROJECT}
+    build:
+      context: ../..
+      dockerfile: contrib/afs/Dockerfile.haproxy
+    init: true
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      TFM_PUBLIC_HOST: "${TFM_PUBLIC_HOST:?Set the certificate and HTTP SPN hostname}"
+    ports:
+      - "${TFM_BIND_ADDRESS:-127.0.0.1}:${TFM_HTTPS_PORT:-8443}:8443"
+    depends_on:
+      tinyfilemanager:
+        condition: service_healthy
+    networks:
+      - public
+      - backend
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    stop_grace_period: 20s
+
+  tls-secrets:
+    image: tinyfilemanager-auristor-tls-init:${TFM_AURISTOR_PROJECT}
+    build:
+      context: ../..
+      dockerfile: contrib/haproxy/Dockerfile.tls-init
+    restart: "no"
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+    volumes:
+      - type: bind
+        source: ${TFM_TLS_CERT_PATH:-./tls.crt}
+        target: /run/secrets-source/tls.crt
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: bind
+        source: ${TFM_TLS_KEY_PATH:-./tls.key}
+        target: /run/secrets-source/tls.key
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: volume
+        source: tls_runtime
+        target: /run/tls-runtime
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+
+  tinyfilemanager:
+    # The derived image contains the licensed provider layer. Keep it private.
+    image: ${TFM_AURISTOR_IMAGE:?Set a distinct local output image, for example tinyfilemanager-auristor:local}
+    build:
+      context: ../..
+      dockerfile: contrib/afs/Dockerfile.auristor
+      args:
+        # This must be an operator-built or private-registry image containing
+        # the licensed AuriStor provider. Never publish it with this project.
+        AURISTOR_PROVIDER_IMAGE: ${TFM_AURISTOR_PROVIDER_IMAGE:?Set a private AuriStor provider image pinned with @sha256}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETGID
+      - SETUID
+    environment:
+      TFM_AFS_PROVIDER: auristor
+      TFM_PUBLIC_HOST: "${TFM_PUBLIC_HOST:?Set the certificate and HTTP SPN hostname}"
+      TFM_AD_REALM: "${TFM_AD_REALM:?Set the uppercase HTTP Kerberos realm}"
+      TFM_AFS_CELL: "${TFM_AFS_CELL:?Set the lowercase AFS cell}"
+      TFM_AFS_REALM: "${TFM_AFS_REALM:?Set the uppercase AFS Kerberos realm}"
+      TFM_DELEG_CCACHE_DIR: /run/tinyfilemanager-auth/clientcaches
+      KRB5RCACHEDIR: /run/tinyfilemanager-auth/rcache
+    depends_on:
+      tls-secrets:
+        condition: service_completed_successfully
+    expose:
+      - "8443"
+    volumes:
+      - type: bind
+        source: ${TFM_CONFIG_PATH:-./config.php}
+        target: /var/www/html/config.php
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: bind
+        source: ${TFM_KRB5_CONFIG_PATH:-./krb5.conf}
+        target: /etc/krb5.conf
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ${TFM_AURISTOR_CONFIG_PATH:?Set the absolute path to yfs-client.conf}
+        target: /etc/yfs/yfs-client.conf
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ${TFM_AUTHORIZED_USERS_PATH:-./authorized-users}
+        target: /run/policy/authorized-users
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: bind
+        source: ${TFM_KEYTAB_DIR:-./keytab}
+        target: /run/secrets-source
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+      - type: bind
+        source: ${TFM_AFS_SOURCE:?Set TFM_AFS_SOURCE to a dedicated absolute host AFS subtree}
+        target: /srv/tinyfilemanager/data
+        bind:
+          create_host_path: false
+      - type: volume
+        source: tls_runtime
+        target: /run/tls-runtime
+        read_only: true
+    networks:
+      - backend
+      - kdc
+    tmpfs:
+      - /run:rw,nosuid,nodev,size=96m,mode=0755
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+    stop_grace_period: 20s
+
+networks:
+  public:
+  backend:
+    internal: true
+  kdc:
+
+volumes:
+  tls_runtime:

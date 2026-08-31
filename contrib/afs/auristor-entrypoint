@@ -1,0 +1,189 @@
+#!/bin/sh
+set -eu
+export LC_ALL=C
+
+fail() {
+    printf 'tinyfilemanager-auristor: %s\n' "$1" >&2
+    exit 1
+}
+
+if [ "${1:-}" = /usr/sbin/httpd ]; then
+    [ "${TFM_AFS_PROVIDER:-}" = auristor ] \
+        || fail 'TFM_AFS_PROVIDER must be auristor'
+
+    public_host=${TFM_PUBLIC_HOST:-}
+    realm=${TFM_AD_REALM:-}
+    afs_cell=${TFM_AFS_CELL:-}
+    afs_realm=${TFM_AFS_REALM:-}
+    expected_principal="HTTP/${public_host}@${realm}"
+    worker=apache
+    keytab_source=/run/secrets-source/http.keytab
+    keytab_dir=/run/tinyfilemanager-keytab
+    keytab_runtime=$keytab_dir/http.keytab
+    auth_dir=/run/tinyfilemanager-auth
+    config=/var/www/html/config.php
+    provider_config=/etc/yfs/yfs-client.conf
+    data_root=/srv/tinyfilemanager/data
+    tls_cert=/run/tls-runtime/tls.crt
+    tls_key=/run/tls-runtime/tls.key
+    authorized_users=/run/policy/authorized-users
+    preflight=/usr/local/libexec/tinyfilemanager-auristor/provider-preflight
+
+    case "$public_host" in
+        ''|.*|*.|*..*|*[!a-z0-9.-]*)
+            fail 'TFM_PUBLIC_HOST must be a lowercase DNS hostname'
+            ;;
+    esac
+    case "$realm" in
+        ''|.*|*.|*..*|*[!A-Z0-9.-]*)
+            fail 'TFM_AD_REALM must be an uppercase Kerberos realm'
+            ;;
+    esac
+    case "$afs_cell" in
+        ''|.*|*.|*..*|*[!a-z0-9.-]*)
+            fail 'TFM_AFS_CELL must be a lowercase DNS cell name'
+            ;;
+    esac
+    case "$afs_realm" in
+        ''|.*|*.|*..*|*[!A-Z0-9.-]*)
+            fail 'TFM_AFS_REALM must be an uppercase Kerberos realm'
+            ;;
+    esac
+
+    [ -s "$config" ] && [ -f "$config" ] && [ ! -L "$config" ] \
+        || fail 'mount config.php as a non-empty regular file'
+    [ -s /etc/krb5.conf ] && [ -f /etc/krb5.conf ] && [ ! -L /etc/krb5.conf ] \
+        || fail 'mount krb5.conf as a non-empty regular file'
+    [ -s "$provider_config" ] && [ -f "$provider_config" ] \
+        && [ ! -L "$provider_config" ] \
+        || fail 'mount yfs-client.conf as a non-empty regular file'
+    [ ! -e /etc/openafs ] || fail 'the native provider must not use /etc/openafs'
+    [ -d "$data_root" ] && [ ! -L "$data_root" ] \
+        || fail 'the data root must be a non-symlink directory'
+    [ -s "$tls_cert" ] && [ -f "$tls_cert" ] && [ ! -L "$tls_cert" ] \
+        || fail 'mount a non-empty regular TLS certificate'
+    [ -s "$tls_key" ] && [ -f "$tls_key" ] && [ ! -L "$tls_key" ] \
+        || fail 'mount a non-empty regular TLS private key'
+    [ -s "$authorized_users" ] && [ -f "$authorized_users" ] \
+        && [ ! -L "$authorized_users" ] \
+        || fail 'mount authorized-users as a non-empty regular file'
+    [ -f "$keytab_source" ] && [ ! -L "$keytab_source" ] \
+        && [ -s "$keytab_source" ] \
+        || fail 'keytab/http.keytab must be a non-empty regular file'
+
+    if ! awk '
+        {
+            separator = 0
+            for (field = 1; field <= NF; field++) {
+                if ($field == "-") { separator = field; break }
+            }
+            if ($5 == "/srv/tinyfilemanager/data" && separator \
+                && $(separator + 1) == "auristorfs") found = 1
+        }
+        END { exit !found }
+    ' /proc/self/mountinfo; then
+        fail 'the data root must be a bind of a native auristorfs filesystem'
+    fi
+
+    runuser -u "$worker" -- test -r "$config" \
+        || fail 'config.php must be readable by the Apache worker'
+    runuser -u "$worker" -- test ! -w "$config" \
+        || fail 'config.php must be mounted read-only'
+    runuser -u "$worker" -- test -r "$provider_config" \
+        || fail 'yfs-client.conf must be readable by the Apache worker'
+    runuser -u "$worker" -- test ! -w "$provider_config" \
+        || fail 'yfs-client.conf must be mounted read-only'
+    /usr/local/bin/php -l "$config" >/dev/null
+    runuser -u "$worker" -- /usr/local/bin/php \
+        /usr/local/lib/tinyfilemanager/validate-config.php "$config"
+
+    if ! awk -v group='tinyfilemanager:' '
+        /^[[:space:]]*(#|$)/ { next }
+        $1 != group || NF < 2 { exit 1 }
+        {
+            lines++
+            for (i = 2; i <= NF; i++) {
+                if (length($i) > 320 || $i !~ /@/ || seen[$i]++) exit 1
+            }
+        }
+        END { if (lines != 1) exit 1 }
+    ' "$authorized_users"; then
+        fail 'authorized-users must contain one exact tinyfilemanager group'
+    fi
+
+    openssl x509 -in "$tls_cert" -noout -checkend 0 >/dev/null \
+        || fail 'TLS certificate is invalid or expired'
+    openssl x509 -in "$tls_cert" -noout -checkhost "$public_host" >/dev/null \
+        || fail 'TLS certificate does not match TFM_PUBLIC_HOST'
+    openssl pkey -in "$tls_key" -passin pass: -noout >/dev/null 2>&1 \
+        || fail 'TLS private key is invalid or encrypted'
+    cert_key_id=$(openssl x509 -in "$tls_cert" -pubkey -noout \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')
+    private_key_id=$(openssl pkey -in "$tls_key" -passin pass: -pubout 2>/dev/null \
+        | openssl pkey -pubin -outform DER 2>/dev/null \
+        | sha256sum | awk '{print $1}')
+    [ "$cert_key_id" = "$private_key_id" ] \
+        || fail 'TLS certificate and private key do not match'
+    unset cert_key_id private_key_id
+
+    install -d -o root -g "$worker" -m 0750 "$keytab_dir"
+    install -o "$worker" -g "$worker" -m 0400 \
+        "$keytab_source" "$keytab_runtime"
+    if ! runuser -u "$worker" -- klist -k "$keytab_runtime" \
+        | awk -v expected="$expected_principal" '
+            NR <= 3 { next }
+            $2 == expected { found = 1; next }
+            NF { unexpected = 1 }
+            END { exit !(found && !unexpected) }
+        '; then
+        fail 'keytab must contain only the expected HTTP service principal'
+    fi
+    if ! runuser -u "$worker" -- klist -ke "$keytab_runtime" \
+        | awk -v expected="$expected_principal" '
+            $2 == expected {
+                found = 1
+                if ($0 !~ / \((DEPRECATED:)?aes(128|256)-[^()]+\)[[:space:]]*$/) invalid = 1
+            }
+            END { exit !(found && !invalid) }
+        '; then
+        fail 'keytab entries must use AES encryption types'
+    fi
+
+    [ "${KRB5RCACHEDIR:-}" = "$auth_dir/rcache" ] \
+        || fail 'KRB5RCACHEDIR must use the private runtime directory'
+    [ "${TFM_DELEG_CCACHE_DIR:-}" = "$auth_dir/clientcaches" ] \
+        || fail 'TFM_DELEG_CCACHE_DIR must use the private runtime directory'
+    [ -z "${GSS_USE_PROXY:-}" ] && [ -z "${GSSPROXY_SOCKET:-}" ] \
+        || fail 'the direct AuriStor profile must not use gssproxy'
+    export KRB5_KTNAME="$keytab_runtime"
+
+    install -d -o "$worker" -g "$worker" -m 0700 \
+        "$auth_dir" "$auth_dir/clientcaches" "$auth_dir/rcache"
+    if find "$auth_dir/clientcaches" -mindepth 1 -maxdepth 1 \
+        -print -quit | grep -q .; then
+        fail 'the delegated-cache directory must be empty at startup'
+    fi
+    if find /tmp -maxdepth 1 -type f -name 'waklog_cache.*' \
+        -print -quit | grep -q .; then
+        fail 'the disabled shared token cache must be absent at startup'
+    fi
+    install -d -o root -g root -m 0755 /run/httpd
+    install -d -o "$worker" -g "$worker" -m 0700 \
+        /tmp/tinyfilemanager-sessions /tmp/tinyfilemanager-uploads
+
+    /usr/local/bin/auristor-provider-verify --runtime
+    runuser -u "$worker" -- env -u KRB5CCNAME -u KRB5_KTNAME \
+        "$preflight" --startup \
+        "$data_root" "$provider_config" "$afs_cell" "$afs_realm" \
+        || fail 'native AuriStor PAG/token preflight failed'
+
+    /usr/sbin/httpd -f /etc/httpd/conf/tinyfilemanager.conf -t
+    if find /tmp -maxdepth 1 -type f -name 'waklog_cache.*' \
+        -print -quit | grep -q .; then
+        fail 'startup checks created a forbidden shared token cache'
+    fi
+    ulimit -c 0
+fi
+
+exec "$@"

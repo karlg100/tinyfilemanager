@@ -1,0 +1,32 @@
+**
+
+!tinyfilemanager.php
+!translation.json
+!LICENSE
+!contrib/
+!contrib/container/
+!contrib/container/apache.conf
+!contrib/container/healthz.php
+!contrib/container/php.ini
+!contrib/afs/
+!contrib/afs/Dockerfile.auristor
+!contrib/afs/auristor-entrypoint
+!contrib/afs/auristor-healthcheck
+!contrib/afs/auristor-preflight
+!contrib/afs/auristor-provider-verify
+!contrib/afs/httpd-auristor.conf
+!contrib/afs/healthz-auristor.php
+!contrib/afs/tinyfilemanager-auristor.conf
+!contrib/afs/validate-config.php
+
+# Site configuration, credentials, vendor packages, and private provider
+# material must never enter this public overlay's build context.
+**/config.php
+**/*.key
+**/*.keytab
+**/*.pem
+**/*.rpm
+**/*.ccache
+**/secrets/**
+**/clientcaches/**
+**/auristor-provider/**

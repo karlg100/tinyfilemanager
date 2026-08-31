@@ -1,0 +1,284 @@
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+
+# Build only on an approved private builder. The named contexts are local,
+# operator-controlled directories and are never copied into the public source
+# context. They must contain complete, signed, checksum-manifested inputs.
+ARG EL9_IMAGE=rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6
+ARG PHP_SOURCE_ARCHIVE=php-8.3.33.tar.xz
+ARG PHP_SOURCE_SHA256=e293ed620cec74651bb4a071317892a478aa6840fab22db45c72d77cd42f9676
+ARG MAG_SOURCE_ARCHIVE=mod_auth_gssapi-1.6.4.tar.gz
+ARG MAG_SOURCE_SHA256=7323affdba44ff560373c996b5eee8ac54fbb6067de5be8737c2f54c64c4e8e6
+
+FROM ${EL9_IMAGE} AS php-builder
+
+ARG EL9_IMAGE
+ARG PHP_SOURCE_ARCHIVE
+ARG PHP_SOURCE_SHA256
+ARG MAG_SOURCE_ARCHIVE
+ARG MAG_SOURCE_SHA256
+
+COPY contrib/afs/patches/mod_auth_gssapi/0001-delegated-cache-contract.patch /patches/mod_auth_gssapi.patch
+
+# auristor_build_rpms supplies the complete offline compiler/header closure.
+# auristor_runtime_rpms supplies the exact final runtime set, including the
+# licensed AuriStor packages and matching libraries. source_archives contains
+# the two pinned public source archives. No network or stock EL9 PHP package
+# participates in this build.
+RUN --network=none \
+    --mount=type=bind,from=auristor_runtime_rpms,target=/run/runtime-rpms,ro \
+    --mount=type=bind,from=auristor_build_rpms,target=/run/build-rpms,ro \
+    --mount=type=bind,from=source_archives,target=/run/source-archives,ro \
+    --mount=type=bind,from=provider_inputs,target=/run/provider-inputs,ro \
+    set -eu; \
+    case "$EL9_IMAGE" in \
+      *@sha256:*) ;; \
+      *) printf '%s\n' 'EL9_IMAGE must be pinned with @sha256' >&2; exit 1 ;; \
+    esac; \
+    base_digest=${EL9_IMAGE##*@sha256:}; \
+    [ "${#base_digest}" -eq 64 ]; \
+    case "$base_digest" in *[!0-9a-f]*) exit 1 ;; esac; \
+    case "$PHP_SOURCE_ARCHIVE" in \
+      php-[0-9]*.[0-9]*.[0-9]*.tar.xz) ;; \
+      *) printf '%s\n' 'PHP_SOURCE_ARCHIVE must name one release tar.xz' >&2; exit 1 ;; \
+    esac; \
+    [ "${#PHP_SOURCE_SHA256}" -eq 64 ]; \
+    case "$PHP_SOURCE_SHA256" in *[!0-9a-f]*) exit 1 ;; esac; \
+    [ -f "/run/source-archives/$PHP_SOURCE_ARCHIVE" ]; \
+    [ ! -L "/run/source-archives/$PHP_SOURCE_ARCHIVE" ]; \
+    printf '%s  %s\n' "$PHP_SOURCE_SHA256" "/run/source-archives/$PHP_SOURCE_ARCHIVE" \
+      | sha256sum -c -; \
+    case "$MAG_SOURCE_ARCHIVE" in \
+      mod_auth_gssapi-[0-9]*.[0-9]*.[0-9]*.tar.gz) ;; \
+      *) printf '%s\n' 'MAG_SOURCE_ARCHIVE must name one release tar.gz' >&2; exit 1 ;; \
+    esac; \
+    [ "${#MAG_SOURCE_SHA256}" -eq 64 ]; \
+    case "$MAG_SOURCE_SHA256" in *[!0-9a-f]*) exit 1 ;; esac; \
+    [ -f "/run/source-archives/$MAG_SOURCE_ARCHIVE" ]; \
+    [ ! -L "/run/source-archives/$MAG_SOURCE_ARCHIVE" ]; \
+    printf '%s  %s\n' "$MAG_SOURCE_SHA256" "/run/source-archives/$MAG_SOURCE_ARCHIVE" \
+      | sha256sum -c -; \
+    for bundle in /run/runtime-rpms /run/build-rpms; do \
+      [ -f "$bundle/SHA256SUMS" ] && [ ! -L "$bundle/SHA256SUMS" ]; \
+      awk 'NF != 2 || $1 !~ /^[0-9a-f]{64}$/ || $2 !~ /^\*?[A-Za-z0-9][A-Za-z0-9._+~-]*\.rpm$/ { exit 1 }' \
+        "$bundle/SHA256SUMS"; \
+      (cd "$bundle" && sha256sum -c SHA256SUMS); \
+      find "$bundle" -maxdepth 1 -type f -name '*.rpm' -printf '%f\n' \
+        | LC_ALL=C sort > /tmp/rpm-files; \
+      awk '{ sub(/^\*/, "", $2); print $2 }' "$bundle/SHA256SUMS" \
+        | LC_ALL=C sort > /tmp/rpm-sums; \
+      cmp -s /tmp/rpm-files /tmp/rpm-sums; \
+    done; \
+    if [ -d /run/provider-inputs/trusted-rpm-keys ]; then \
+      find /run/provider-inputs/trusted-rpm-keys -maxdepth 1 -type f \
+        -name '*.asc' -exec rpmkeys --import '{}' +; \
+    fi; \
+    for rpm_file in /run/runtime-rpms/*.rpm /run/build-rpms/*.rpm; do \
+      signature_result=$(rpmkeys --checksig "$rpm_file"); \
+      printf '%s\n' "$signature_result" \
+        | grep -Eq ': digests signatures OK$'; \
+    done; \
+    dnf -y --disablerepo='*' --setopt=install_weak_deps=False install \
+      /run/runtime-rpms/*.rpm /run/build-rpms/*.rpm; \
+    ! rpm -qa --qf '%{NAME}\n' | grep -Eq '^php($|-)'; \
+    install -d /build/php /usr/local/etc/php/conf.d; \
+    tar -xJf "/run/source-archives/$PHP_SOURCE_ARCHIVE" \
+      -C /build/php --strip-components=1; \
+    cd /build/php; \
+    CFLAGS='-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2' \
+      LDFLAGS='-Wl,-z,relro,-z,now' \
+      ./configure \
+        --prefix=/usr/local \
+        --with-config-file-path=/usr/local/etc \
+        --with-config-file-scan-dir=/usr/local/etc/php/conf.d \
+        --with-apxs2=/usr/bin/apxs \
+        --enable-cli \
+        --disable-cgi \
+        --disable-fpm \
+        --disable-phpdbg \
+        --enable-ctype \
+        --enable-fileinfo \
+        --enable-filter \
+        --enable-mbstring \
+        --enable-posix \
+        --enable-session \
+        --with-iconv \
+        --with-openssl \
+        --with-zip \
+        --with-zlib \
+        --without-pear; \
+    make -j"$(nproc)"; \
+    make install; \
+    test -x /usr/local/bin/php; \
+    test -f /usr/lib64/httpd/modules/libphp.so; \
+    test ! -x /usr/local/bin/php-cgi; \
+    test ! -x /usr/local/sbin/php-fpm; \
+    strip --strip-unneeded \
+      /usr/local/bin/php /usr/lib64/httpd/modules/libphp.so; \
+    install -d /build/auth /out; \
+    tar -xzf "/run/source-archives/$MAG_SOURCE_ARCHIVE" \
+      -C /build/auth --strip-components=1; \
+    patch --batch --forward -d /build/auth -p1 < /patches/mod_auth_gssapi.patch; \
+    cd /build/auth; \
+    autoreconf -fi; \
+    CFLAGS='-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2' \
+      LDFLAGS='-Wl,-z,relro,-z,now' \
+      ./configure --with-apxs=/usr/bin/apxs --with-apr=/usr/bin/apr-1-config; \
+    make -j"$(nproc)" V=1; \
+    install -m 0555 src/.libs/mod_auth_gssapi.so /out/mod_auth_gssapi.so; \
+    strip --strip-unneeded /out/mod_auth_gssapi.so
+
+FROM ${EL9_IMAGE} AS provider
+
+ARG EL9_IMAGE
+ARG PHP_SOURCE_SHA256
+ARG MAG_SOURCE_SHA256
+
+COPY --from=php-builder /usr/local/ /usr/local/
+COPY --from=php-builder /usr/lib64/httpd/modules/libphp.so /usr/lib64/httpd/modules/libphp.so
+COPY --from=php-builder /out/mod_auth_gssapi.so /usr/lib64/httpd/modules/mod_auth_gssapi.so
+COPY --from=php-builder /build/php/LICENSE /usr/share/licenses/php/LICENSE
+
+COPY contrib/afs/auristor-provider-verify /usr/local/bin/auristor-provider-verify
+COPY contrib/afs/auristor-preflight /usr/local/libexec/tinyfilemanager-auristor/provider-preflight
+COPY contrib/afs/LICENSE.mod-auth-gssapi /usr/share/licenses/mod-auth-gssapi/LICENSE
+COPY contrib/afs/providers/auristor/provider-global.conf /etc/tinyfilemanager-auristor/provider-global.conf
+COPY contrib/afs/providers/auristor/provider-enabled.conf /etc/tinyfilemanager-auristor/provider-enabled.conf
+COPY contrib/afs/providers/auristor/provider-disabled.conf /etc/tinyfilemanager-auristor/provider-disabled.conf
+
+# auristor_runtime_rpms contains the complete offline final closure: httpd,
+# mod_ssl, krb5-workstation, PHP runtime libraries, verification utilities,
+# and the licensed yfs and mod_waklog-yfs RPMs. It must contain no stock PHP,
+# PHP-FPM, OpenAFS, or mod_auth_gssapi package. provider_inputs may contain
+# public RPM signing keys beneath trusted-rpm-keys/. Neither context accepts a
+# repository credential. SHA256SUMS must list every RPM basename exactly once.
+RUN --network=none \
+    --mount=type=bind,from=auristor_runtime_rpms,target=/run/runtime-rpms,ro \
+    --mount=type=bind,from=provider_inputs,target=/run/provider-inputs,ro \
+    set -eu; \
+    case "$EL9_IMAGE" in \
+      *@sha256:*) ;; \
+      *) printf '%s\n' 'EL9_IMAGE must be pinned with @sha256' >&2; exit 1 ;; \
+    esac; \
+    base_digest=${EL9_IMAGE##*@sha256:}; \
+    [ "${#base_digest}" -eq 64 ]; \
+    case "$base_digest" in *[!0-9a-f]*) exit 1 ;; esac; \
+    for bundle in /run/runtime-rpms; do \
+      [ -f "$bundle/SHA256SUMS" ] && [ ! -L "$bundle/SHA256SUMS" ]; \
+      awk 'NF != 2 || $1 !~ /^[0-9a-f]{64}$/ || $2 !~ /^\*?[A-Za-z0-9][A-Za-z0-9._+~-]*\.rpm$/ { exit 1 }' \
+        "$bundle/SHA256SUMS"; \
+      (cd "$bundle" && sha256sum -c SHA256SUMS); \
+      find "$bundle" -maxdepth 1 -type f -name '*.rpm' -printf '%f\n' \
+        | LC_ALL=C sort > /tmp/rpm-files; \
+      awk '{ sub(/^\*/, "", $2); print $2 }' "$bundle/SHA256SUMS" \
+        | LC_ALL=C sort > /tmp/rpm-sums; \
+      cmp -s /tmp/rpm-files /tmp/rpm-sums; \
+    done; \
+    if [ -d /run/provider-inputs/trusted-rpm-keys ]; then \
+      find /run/provider-inputs/trusted-rpm-keys -maxdepth 1 -type f \
+        -name '*.asc' -exec rpmkeys --import '{}' +; \
+    fi; \
+    for rpm_file in /run/runtime-rpms/*.rpm; do \
+      signature_result=$(rpmkeys --checksig "$rpm_file"); \
+      printf '%s\n' "$signature_result" \
+        | grep -Eq ': digests signatures OK$'; \
+    done; \
+    dnf -y --disablerepo='*' --setopt=install_weak_deps=False install \
+      /run/runtime-rpms/*.rpm; \
+    dnf clean all; \
+    install -d -m 0755 \
+      /etc/tinyfilemanager-auristor \
+      /usr/local/libexec/tinyfilemanager-auristor \
+      /usr/share/tinyfilemanager-auristor; \
+    rm -f /tmp/rpm-files /tmp/rpm-sums; \
+    test ! -e /etc/openafs; \
+    ! rpm -qa --qf '%{NAME}\n' | grep -Eq '^php($|-)'; \
+    ! rpm -qa --qf '%{NAME}\n' | grep -Eq '^mod_auth_gssapi($|-)'; \
+    test -x /usr/local/bin/php; \
+    test -f /usr/lib64/httpd/modules/libphp.so; \
+    test ! -x /usr/local/bin/php-cgi; \
+    test ! -x /usr/local/sbin/php-fpm
+
+RUN set -eu; \
+    printf '%s\n' 'LoadModule mpm_prefork_module modules/mod_mpm_prefork.so' \
+      > /etc/httpd/conf.modules.d/00-mpm.conf; \
+    grep -RqsE '^[[:space:]]*LoadModule[[:space:]]+auth_gssapi_module[[:space:]]' \
+      /etc/httpd/conf.modules.d \
+      || printf '%s\n' 'LoadModule auth_gssapi_module modules/mod_auth_gssapi.so' \
+        > /etc/httpd/conf.modules.d/10-auth_gssapi.conf; \
+    grep -RqsE '^[[:space:]]*LoadModule[[:space:]]+waklog_module[[:space:]]' \
+      /etc/httpd/conf.modules.d \
+      || printf '%s\n' 'LoadModule waklog_module modules/mod_waklog.so' \
+        > /etc/httpd/conf.modules.d/20-waklog.conf; \
+    grep -RqsE '^[[:space:]]*LoadModule[[:space:]]+php_module[[:space:]]' \
+      /etc/httpd/conf.modules.d \
+      || printf '%s\n' 'LoadModule php_module modules/libphp.so' \
+        > /etc/httpd/conf.modules.d/20-php.conf; \
+    sed -ri \
+      '/^[[:space:]]*LoadModule[[:space:]]+(http2|proxy_fcgi|fcgid|cgi|cgid)_module[[:space:]]/s/^/#/' \
+      /etc/httpd/conf.modules.d/*.conf; \
+    find /etc/httpd/conf.d -maxdepth 1 -type f -name '*.conf' -delete; \
+    chmod 0555 \
+      /usr/local/bin/auristor-provider-verify \
+      /usr/local/libexec/tinyfilemanager-auristor/provider-preflight; \
+    chmod 0444 /etc/tinyfilemanager-auristor/provider-*.conf; \
+    client_nevra=$(rpm -q --qf '%{NEVRA}' yfs); \
+    module_nevra=$(rpm -q --qf '%{NEVRA}' mod_waklog-yfs); \
+    php_version=$(/usr/local/bin/php -n -r 'echo PHP_VERSION;'); \
+    module_sha=$(sha256sum /usr/lib64/httpd/modules/mod_waklog.so | awk '{print $1}'); \
+    gssapi_sha=$(sha256sum /usr/lib64/httpd/modules/mod_auth_gssapi.so | awk '{print $1}'); \
+    php_cli_sha=$(sha256sum /usr/local/bin/php | awk '{print $1}'); \
+    php_module_sha=$(sha256sum /usr/lib64/httpd/modules/libphp.so | awk '{print $1}'); \
+    preflight_sha=$(sha256sum /usr/local/libexec/tinyfilemanager-auristor/provider-preflight | awk '{print $1}'); \
+    global_sha=$(sha256sum /etc/tinyfilemanager-auristor/provider-global.conf | awk '{print $1}'); \
+    enabled_sha=$(sha256sum /etc/tinyfilemanager-auristor/provider-enabled.conf | awk '{print $1}'); \
+    disabled_sha=$(sha256sum /etc/tinyfilemanager-auristor/provider-disabled.conf | awk '{print $1}'); \
+    rpm -qa --qf '%{NEVRA}\n' | LC_ALL=C sort \
+      > /usr/share/tinyfilemanager-auristor/provider-rpms.txt; \
+    manifest_sha=$(sha256sum /usr/share/tinyfilemanager-auristor/provider-rpms.txt | awk '{print $1}'); \
+    printf '%s\n' \
+      'contract_version=1' \
+      'provider=auristor' \
+      'os_family=el9' \
+      'filesystem_type=auristorfs' \
+      'config_path=/etc/yfs/yfs-client.conf' \
+      'apache_user=apache' \
+      'apache_group=apache' \
+      'token_module_id=waklog_module' \
+      'gssapi_module_id=auth_gssapi_module' \
+      "client_package_nevra=$client_nevra" \
+      "module_package_nevra=$module_nevra" \
+      "gssapi_source_sha256=$MAG_SOURCE_SHA256" \
+      "php_version=$php_version" \
+      "php_source_sha256=$PHP_SOURCE_SHA256" \
+      'module_path=/usr/lib64/httpd/modules/mod_waklog.so' \
+      "module_sha256=$module_sha" \
+      'gssapi_module_path=/usr/lib64/httpd/modules/mod_auth_gssapi.so' \
+      "gssapi_module_sha256=$gssapi_sha" \
+      'php_cli_path=/usr/local/bin/php' \
+      "php_cli_sha256=$php_cli_sha" \
+      'php_module_path=/usr/lib64/httpd/modules/libphp.so' \
+      "php_module_sha256=$php_module_sha" \
+      'php_scan_dir=/usr/local/etc/php/conf.d' \
+      'preflight_path=/usr/local/libexec/tinyfilemanager-auristor/provider-preflight' \
+      "preflight_sha256=$preflight_sha" \
+      'global_fragment_path=/etc/tinyfilemanager-auristor/provider-global.conf' \
+      "global_fragment_sha256=$global_sha" \
+      'enabled_fragment_path=/etc/tinyfilemanager-auristor/provider-enabled.conf' \
+      "enabled_fragment_sha256=$enabled_sha" \
+      'disabled_fragment_path=/etc/tinyfilemanager-auristor/provider-disabled.conf' \
+      "disabled_fragment_sha256=$disabled_sha" \
+      'rpm_manifest_path=/usr/share/tinyfilemanager-auristor/provider-rpms.txt' \
+      "rpm_manifest_sha256=$manifest_sha" \
+      > /usr/share/tinyfilemanager-auristor/provider.lock; \
+    chown -R root:root \
+      /etc/tinyfilemanager-auristor \
+      /usr/local/libexec/tinyfilemanager-auristor \
+      /usr/share/tinyfilemanager-auristor; \
+    chmod 0444 \
+      /usr/share/tinyfilemanager-auristor/provider.lock \
+      /usr/share/tinyfilemanager-auristor/provider-rpms.txt; \
+    /usr/local/bin/auristor-provider-verify --build
+
+LABEL org.opencontainers.image.title="Private native AuriStor Apache provider" \
+      org.opencontainers.image.description="Licensed operator-built input for the public Tiny File Manager overlay" \
+      org.opencontainers.image.lifecycle="private-build-input"

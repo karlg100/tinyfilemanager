@@ -1,0 +1,332 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    printf 'tinyfilemanager-auristor-provider: %s\n' "$1" >&2
+    exit 1
+}
+
+usage() {
+    fail 'usage: auristor-provider-verify --build|--runtime'
+}
+
+[ "$#" -eq 1 ] || usage
+case "$1" in
+    --build|--runtime) mode=$1 ;;
+    *) usage ;;
+esac
+
+export LC_ALL=C
+contract_root=/usr/share/tinyfilemanager-auristor
+lock=$contract_root/provider.lock
+lock_digest=$contract_root/provider.lock.sha256
+
+regular_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] \
+        || fail "$2 must be a regular, non-symlink file"
+}
+
+locked_file() {
+    regular_file "$1" "$2"
+    [ "$(stat -c '%u:%g' "$1")" = '0:0' ] \
+        || fail "$2 must be owned by root"
+    [ -z "$(find "$1" -prune -perm /022 -print)" ] \
+        || fail "$2 must not be group- or world-writable"
+}
+
+lock_value() {
+    awk -F= -v wanted="$1" '
+        $1 == wanted {
+            if (++matches != 1) exit 2
+            value = substr($0, length(wanted) + 2)
+        }
+        END {
+            if (matches != 1 || value == "") exit 1
+            print value
+        }
+    ' "$lock" || fail "provider.lock has an invalid $1 field"
+}
+
+valid_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in
+        *[!0-9a-f]*) return 1 ;;
+    esac
+}
+
+verify_sha256() {
+    path=$1
+    expected=$2
+    label=$3
+    valid_sha256 "$expected" || fail "$label has an invalid SHA-256"
+    actual=$(sha256sum "$path" | awk '{ print $1 }')
+    [ "$actual" = "$expected" ] || fail "$label does not match provider.lock"
+}
+
+command -v awk >/dev/null 2>&1 || fail 'awk is required'
+command -v find >/dev/null 2>&1 || fail 'find is required'
+command -v grep >/dev/null 2>&1 || fail 'grep is required'
+command -v getcap >/dev/null 2>&1 || fail 'getcap is required'
+command -v ldd >/dev/null 2>&1 || fail 'ldd is required'
+command -v readelf >/dev/null 2>&1 || fail 'readelf is required'
+command -v rpm >/dev/null 2>&1 || fail 'rpm is required'
+command -v runuser >/dev/null 2>&1 || fail 'runuser is required'
+command -v sha256sum >/dev/null 2>&1 || fail 'sha256sum is required'
+command -v stat >/dev/null 2>&1 || fail 'stat is required'
+
+locked_file "$lock" 'provider.lock'
+if [ "$mode" = '--runtime' ]; then
+    locked_file "$lock_digest" 'provider.lock.sha256'
+    (cd "$contract_root" && sha256sum -c provider.lock.sha256 >/dev/null) \
+        || fail 'provider.lock changed after the public image was assembled'
+fi
+
+required_keys='contract_version provider os_family filesystem_type config_path apache_user apache_group token_module_id gssapi_module_id client_package_nevra module_package_nevra gssapi_source_sha256 php_version php_source_sha256 module_path module_sha256 gssapi_module_path gssapi_module_sha256 php_cli_path php_cli_sha256 php_module_path php_module_sha256 php_scan_dir preflight_path preflight_sha256 global_fragment_path global_fragment_sha256 enabled_fragment_path enabled_fragment_sha256 disabled_fragment_path disabled_fragment_sha256 rpm_manifest_path rpm_manifest_sha256'
+awk -F= -v required="$required_keys" '
+    BEGIN {
+        count = split(required, names, " ")
+        for (i = 1; i <= count; i++) allowed[names[i]] = 1
+    }
+    !/^[a-z][a-z0-9_]*=[^=[:cntrl:]]+$/ { bad = 1; next }
+    !($1 in allowed) || seen[$1]++ { bad = 1 }
+    END {
+        for (name in allowed) if (!(name in seen)) bad = 1
+        exit bad
+    }
+' "$lock" || fail 'provider.lock must contain exactly the v1 contract fields'
+
+contract_version=$(lock_value contract_version)
+provider=$(lock_value provider)
+os_family=$(lock_value os_family)
+filesystem_type=$(lock_value filesystem_type)
+config_path=$(lock_value config_path)
+apache_user=$(lock_value apache_user)
+apache_group=$(lock_value apache_group)
+token_module_id=$(lock_value token_module_id)
+gssapi_module_id=$(lock_value gssapi_module_id)
+client_package_nevra=$(lock_value client_package_nevra)
+module_package_nevra=$(lock_value module_package_nevra)
+gssapi_source_sha256=$(lock_value gssapi_source_sha256)
+php_version=$(lock_value php_version)
+php_source_sha256=$(lock_value php_source_sha256)
+module_path=$(lock_value module_path)
+module_sha256=$(lock_value module_sha256)
+gssapi_module_path=$(lock_value gssapi_module_path)
+gssapi_module_sha256=$(lock_value gssapi_module_sha256)
+php_cli_path=$(lock_value php_cli_path)
+php_cli_sha256=$(lock_value php_cli_sha256)
+php_module_path=$(lock_value php_module_path)
+php_module_sha256=$(lock_value php_module_sha256)
+php_scan_dir=$(lock_value php_scan_dir)
+preflight_path=$(lock_value preflight_path)
+preflight_sha256=$(lock_value preflight_sha256)
+global_fragment_path=$(lock_value global_fragment_path)
+global_fragment_sha256=$(lock_value global_fragment_sha256)
+enabled_fragment_path=$(lock_value enabled_fragment_path)
+enabled_fragment_sha256=$(lock_value enabled_fragment_sha256)
+disabled_fragment_path=$(lock_value disabled_fragment_path)
+disabled_fragment_sha256=$(lock_value disabled_fragment_sha256)
+rpm_manifest_path=$(lock_value rpm_manifest_path)
+rpm_manifest_sha256=$(lock_value rpm_manifest_sha256)
+
+[ "$contract_version" = 1 ] || fail 'unsupported provider contract version'
+[ "$provider" = auristor ] || fail 'provider.lock does not select native AuriStor'
+[ "$os_family" = el9 ] || fail 'the native AuriStor provider must be an EL9 image'
+[ "$filesystem_type" = auristorfs ] || fail 'provider.lock has the wrong filesystem type'
+[ "$config_path" = /etc/yfs/yfs-client.conf ] || fail 'provider.lock has the wrong client configuration path'
+[ "$apache_user" = apache ] && [ "$apache_group" = apache ] \
+    || fail 'the v1 provider contract requires the EL9 apache account'
+[ "$module_path" = /usr/lib64/httpd/modules/mod_waklog.so ] \
+    || fail 'provider.lock has the wrong token-module path'
+[ "$gssapi_module_path" = /usr/lib64/httpd/modules/mod_auth_gssapi.so ] \
+    || fail 'provider.lock has the wrong GSSAPI-module path'
+[ "$php_cli_path" = /usr/local/bin/php ] \
+    || fail 'provider.lock has the wrong PHP CLI path'
+[ "$php_module_path" = /usr/lib64/httpd/modules/libphp.so ] \
+    || fail 'provider.lock has the wrong in-process PHP-module path'
+[ "$php_scan_dir" = /usr/local/etc/php/conf.d ] \
+    || fail 'provider.lock has the wrong PHP configuration scan directory'
+[ "$preflight_path" = /usr/local/libexec/tinyfilemanager-auristor/provider-preflight ] \
+    || fail 'provider.lock has the wrong preflight path'
+[ "$global_fragment_path" = /etc/tinyfilemanager-auristor/provider-global.conf ] \
+    || fail 'provider.lock has the wrong global-fragment path'
+[ "$enabled_fragment_path" = /etc/tinyfilemanager-auristor/provider-enabled.conf ] \
+    || fail 'provider.lock has the wrong enabled-fragment path'
+[ "$disabled_fragment_path" = /etc/tinyfilemanager-auristor/provider-disabled.conf ] \
+    || fail 'provider.lock has the wrong disabled-fragment path'
+[ "$rpm_manifest_path" = /usr/share/tinyfilemanager-auristor/provider-rpms.txt ] \
+    || fail 'provider.lock has the wrong RPM-manifest path'
+
+case "$token_module_id" in
+    [a-z][a-z0-9_]*_module) ;;
+    *) fail 'provider.lock has an invalid token module identifier' ;;
+esac
+case "$gssapi_module_id" in
+    [a-z][a-z0-9_]*_module) ;;
+    *) fail 'provider.lock has an invalid GSSAPI module identifier' ;;
+esac
+case "$client_package_nevra" in
+    yfs-2021.05-71.el9.x86_64|yfs-2021.05-71.el9.aarch64|\
+    yfs-0:2021.05-71.el9.x86_64|yfs-0:2021.05-71.el9.aarch64) ;;
+    *) fail 'provider contract v1 requires yfs 2021.05-71 for EL9' ;;
+esac
+case "$module_package_nevra" in
+    mod_waklog-yfs-2021.05-71.el9.x86_64|\
+    mod_waklog-yfs-2021.05-71.el9.aarch64|\
+    mod_waklog-yfs-0:2021.05-71.el9.x86_64|\
+    mod_waklog-yfs-0:2021.05-71.el9.aarch64) ;;
+    *) fail 'provider contract v1 requires mod_waklog-yfs 2021.05-71 for EL9' ;;
+esac
+[ "$gssapi_source_sha256" = \
+    7323affdba44ff560373c996b5eee8ac54fbb6067de5be8737c2f54c64c4e8e6 ] \
+    || fail 'provider contract v1 requires mod_auth_gssapi 1.6.4 source'
+[ "$php_version" = 8.3.33 ] \
+    || fail 'provider contract v1 requires PHP 8.3.33'
+[ "$php_source_sha256" = \
+    e293ed620cec74651bb4a071317892a478aa6840fab22db45c72d77cd42f9676 ] \
+    || fail 'provider contract v1 requires the pinned PHP 8.3.33 source'
+
+version_id=$(awk -F= '
+    $1 == "VERSION_ID" {
+        value = substr($0, index($0, "=") + 1)
+        gsub(/^"|"$/, "", value)
+        print value
+        exit
+    }
+' /etc/os-release)
+case "$version_id" in
+    9|9.*) ;;
+    *) fail 'the provider base is not EL9' ;;
+esac
+
+getent passwd "$apache_user" >/dev/null \
+    || fail 'the provider base has no apache user'
+getent group "$apache_group" >/dev/null \
+    || fail 'the provider base has no apache group'
+[ "$(id -u "$apache_user")" = 48 ] && [ "$(id -g "$apache_user")" = 48 ] \
+    || fail 'the v1 provider contract requires apache UID/GID 48'
+
+for command_path in \
+    /usr/sbin/httpd /usr/bin/fs /usr/bin/klist /usr/bin/openssl \
+    /usr/bin/pagsh /usr/bin/tokens /usr/bin/timeout \
+    "$php_cli_path"
+do
+    [ -x "$command_path" ] || fail "$command_path is required by the provider contract"
+done
+
+locked_file "$module_path" 'native token module'
+locked_file "$gssapi_module_path" 'GSSAPI module'
+locked_file "$php_cli_path" 'PHP CLI'
+locked_file "$php_module_path" 'in-process PHP module'
+locked_file "$preflight_path" 'provider preflight'
+locked_file "$global_fragment_path" 'provider global fragment'
+locked_file "$enabled_fragment_path" 'provider enabled fragment'
+locked_file "$disabled_fragment_path" 'provider disabled fragment'
+locked_file "$rpm_manifest_path" 'provider RPM manifest'
+[ -x "$preflight_path" ] || fail 'provider preflight is not executable'
+[ -z "$(find "$preflight_path" -prune -perm /6000 -print)" ] \
+    || fail 'provider preflight must not be setuid or setgid'
+if [ -n "$(getcap "$preflight_path" 2>/dev/null)" ]; then
+    fail 'provider preflight must not carry file capabilities'
+fi
+
+verify_sha256 "$module_path" "$module_sha256" 'native token module'
+verify_sha256 "$gssapi_module_path" "$gssapi_module_sha256" 'GSSAPI module'
+verify_sha256 "$php_cli_path" "$php_cli_sha256" 'PHP CLI'
+verify_sha256 "$php_module_path" "$php_module_sha256" 'in-process PHP module'
+verify_sha256 "$preflight_path" "$preflight_sha256" 'provider preflight'
+verify_sha256 "$global_fragment_path" "$global_fragment_sha256" 'provider global fragment'
+verify_sha256 "$enabled_fragment_path" "$enabled_fragment_sha256" 'provider enabled fragment'
+verify_sha256 "$disabled_fragment_path" "$disabled_fragment_sha256" 'provider disabled fragment'
+verify_sha256 "$rpm_manifest_path" "$rpm_manifest_sha256" 'provider RPM manifest'
+
+actual_client_nevra=$(rpm -q --qf '%{NEVRA}\n' yfs) \
+    || fail 'the locked yfs package is not installed'
+actual_module_nevra=$(rpm -q --qf '%{NEVRA}\n' mod_waklog-yfs) \
+    || fail 'the locked mod_waklog-yfs package is not installed'
+[ "$actual_client_nevra" = "$client_package_nevra" ] \
+    || fail 'the installed yfs package does not match provider.lock'
+[ "$actual_module_nevra" = "$module_package_nevra" ] \
+    || fail 'the installed mod_waklog-yfs package does not match provider.lock'
+[ "$(rpm -qf --qf '%{NEVRA}\n' "$module_path")" = "$module_package_nevra" ] \
+    || fail 'the native token module is not owned by the locked package'
+
+if rpm -qa --qf '%{NAME}\n' | grep -Eiq 'openafs'; then
+    fail 'OpenAFS packages must not be installed in the native provider image'
+fi
+[ ! -e /etc/openafs ] || fail '/etc/openafs must not exist in the native provider image'
+if rpm -qa --qf '%{NAME}\n' \
+    | grep -Eq '^(yfs-client|yfs-kmod($|-)|auristorfs-client|auristorfs-modules($|-))'; then
+    fail 'host Cache Manager and kernel packages must not be installed in the provider image'
+fi
+if rpm -qa --qf '%{NAME}\n' | grep -Eq '^mod_auth_gssapi($|-)'; then
+    fail 'a stock GSSAPI module must not replace the pinned patched source build'
+fi
+if rpm -qa --qf '%{NAME}\n' | grep -Eq '^php($|-)'; then
+    fail 'stock EL9 PHP packages must not coexist with the pinned source build'
+fi
+[ ! -x /usr/local/bin/php-cgi ] && [ ! -x /usr/local/sbin/php-fpm ] \
+    || fail 'CGI and PHP-FPM SAPIs are forbidden'
+
+actual_php_version=$("$php_cli_path" -n -r 'echo PHP_VERSION;') \
+    || fail 'the pinned PHP CLI could not run'
+[ "$actual_php_version" = "$php_version" ] \
+    || fail 'the PHP CLI version does not match provider.lock'
+actual_php_scan_dir=$("$php_cli_path" -n -r 'echo PHP_CONFIG_FILE_SCAN_DIR;') \
+    || fail 'the PHP configuration scan directory could not be read'
+[ "$actual_php_scan_dir" = "$php_scan_dir" ] \
+    || fail 'PHP CLI and Apache do not share the locked configuration path'
+"$php_cli_path" -n -r '
+    $required = array("ctype", "fileinfo", "filter", "hash", "iconv", "json",
+        "mbstring", "openssl", "pcre", "posix", "session", "SPL", "standard",
+        "zip", "zlib");
+    foreach ($required as $extension) {
+        if (!extension_loaded($extension)) exit(1);
+    }
+    exit(PHP_SAPI === "cli" ? 0 : 1);
+' || fail 'the pinned PHP CLI has the wrong SAPI or extension set'
+
+actual_rpm_manifest_sha256=$(
+    rpm -qa --qf '%{NEVRA}\n' | LC_ALL=C sort | sha256sum | awk '{ print $1 }'
+)
+[ "$actual_rpm_manifest_sha256" = "$rpm_manifest_sha256" ] \
+    || fail 'the installed RPM set does not match the locked manifest'
+
+for module_file in "$module_path" "$gssapi_module_path" "$php_module_path"; do
+    if ldd "$module_file" 2>&1 | grep -q 'not found'; then
+        fail 'an Apache module has an unresolved shared-library dependency'
+    fi
+    if readelf -d "$module_file" 2>/dev/null \
+        | grep -Eq '\((RPATH|RUNPATH)\)'; then
+        fail 'an Apache module contains a forbidden RPATH or RUNPATH'
+    fi
+done
+
+contract_output=$(
+    runuser -u "$apache_user" -- "$preflight_path" --contract 2>/dev/null
+) || fail 'provider preflight rejected the contract query'
+[ "$contract_output" = tinyfilemanager-auristor-preflight-v1 ] \
+    || fail 'provider preflight implements the wrong contract'
+
+if [ "$mode" = '--runtime' ]; then
+    httpd_modules=$(
+        /usr/sbin/httpd -f /etc/httpd/conf/tinyfilemanager.conf -M 2>/dev/null
+    ) || fail 'Apache could not load the assembled runtime configuration'
+else
+    httpd_modules=$(/usr/sbin/httpd -M 2>/dev/null) \
+        || fail 'Apache could not load the provider base configuration'
+fi
+printf '%s\n' "$httpd_modules" | grep -Eq "^[[:space:]]*$token_module_id \(shared\)$" \
+    || fail 'the locked native token module is not loaded by Apache'
+printf '%s\n' "$httpd_modules" | grep -Eq "^[[:space:]]*$gssapi_module_id \(shared\)$" \
+    || fail 'the locked GSSAPI module is not loaded by Apache'
+printf '%s\n' "$httpd_modules" | grep -Eq '^[[:space:]]*mpm_prefork_module \(shared\)$' \
+    || fail 'Apache prefork MPM is required'
+printf '%s\n' "$httpd_modules" | grep -Eq '^[[:space:]]*php_module \(shared\)$' \
+    || fail 'in-process mod_php is required'
+if printf '%s\n' "$httpd_modules" \
+    | grep -Eq '^[[:space:]]*(http2|proxy_fcgi|fcgid|cgi|cgid)_module '; then
+    fail 'HTTP/2 and out-of-process handlers are forbidden'
+fi
+
+exit 0

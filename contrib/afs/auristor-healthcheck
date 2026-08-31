@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+# Liveness only: this deliberately does not traverse the AFS mount or claim
+# that delegation, PAG isolation, tokens, or authorization are ready.
+if find /tmp -maxdepth 1 -type f -name 'waklog_cache.*' \
+    -print -quit | grep -q .; then
+    exit 1
+fi
+
+exec runuser -u apache -- /usr/local/bin/php -r '
+$socket = @stream_socket_client(
+    "tcp://127.0.0.1:8081", $errorCode, $errorMessage, 2);
+if ($socket === false) exit(1);
+fwrite($socket, "GET /healthz.php HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+$status = fgets($socket);
+fclose($socket);
+exit(is_string($status) && preg_match("~^HTTP/[0-9.]+ 204 ~", $status) ? 0 : 1);
+'

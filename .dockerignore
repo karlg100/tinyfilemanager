@@ -24,6 +24,12 @@
 /contrib/afs/keytab/
 /contrib/afs/krb5.conf
 /contrib/afs/openafs/
+/contrib/afs/yfs-client.conf
+/contrib/afs/auristor-provider/
+/contrib/afs/auristor-runtime-rpms/
+/contrib/afs/auristor-build-rpms/
+/contrib/afs/provider-inputs/
+/contrib/afs/source-archives/
 /contrib/afs/tls.crt
 /contrib/afs/tls.key
 /contrib/afs/*.ccache
@@ -32,4 +38,6 @@
 /contrib/afs/*.p12
 /contrib/afs/*.pem
 /contrib/afs/*.pfx
+/contrib/afs/*.rpm
+/contrib/afs/*.tar.*
 /contrib/afs/krb5cc_*

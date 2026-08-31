@@ -1,10 +1,11 @@
 # AFS implementation and security requirements
 
-> **Status:** [`README.md`](README.md) supplies a separate, pinned AFS
-> prototype and deployment recipe built against the OpenAFS 1.8 userspace ABI.
-> It remains a trusted-intranet,
-> non-production profile until the documented live browser/KDC/AFS gate passes
-> on the target environment.
+> **Status:** [`README.md`](README.md) defines two provider options. Option 1 is
+> the supplied, pinned OpenAFS 1.8 prototype and runnable recipe. Option 2 is a
+> native AuriStor assembly profile that consumes an operator-supplied private
+> provider image. Licensed AuriStor inputs and binaries are not supplied here.
+> Both remain trusted-intranet, non-production profiles until their documented
+> live browser/KDC/AFS gates pass in the target environment.
 
 Add this layer only after the
 [`contrib/haproxy`](../haproxy/README.md) stack—which includes Tiny File
@@ -12,12 +13,31 @@ Manager—is healthy and a real Kerberos browser sign-on has passed. Do not
 modify or replace the working deployment while developing the AFS layer.
 
 At a glance: the AFS layer is Linux-only, a bind mount alone is insufficient,
-per-user access requires full browser delegation, and the supplied
-OpenAFS-linked profile still requires target-site acceptance testing. It can
-potentially interoperate with AuriStorFS servers only through their documented
-OpenAFS-client/RxKAD path and its security and data-model restrictions; native
-AuriStorFS/YFS and rxgk are separate provider targets and are not supplied
-here.
+per-user access requires full browser delegation, and every provider requires
+target-site acceptance testing. The two images have different native ABIs and
+must remain separate.
+
+## Provider options
+
+### Option 1: OpenAFS 1.8
+
+The repository supplies this option. It builds against Debian's OpenAFS 1.8
+ABI, expects an OpenAFS host Cache Manager and `afs` mount, and uses the pinned
+hardened SourceForge `mod_waklog` lineage. It can reach AuriStor servers only
+through the documented OpenAFS-client/RxKAD interoperability boundary and all
+of its security and data-model restrictions. See the
+[OpenAFS provider summary](providers/openafs/README.md).
+
+### Option 2: native AuriStor
+
+This option requires the exact version-1 EL9 provider contract, a native
+AuriStorFS/YFS Cache Manager, and an `auristorfs` mount. Its exact licensed
+RPMs, repository inputs, provider image, and derived image must remain in an
+approved private environment. This repository supplies an offline provider
+Containerfile, public tokenless-PAG preflight and module fragments, the
+application overlay, and Compose profile; it redistributes no AuriStor binary.
+The current OpenAFS binaries and patches are not substitutes. See the
+[native AuriStor recipe](providers/auristor/README.md).
 
 ## Keep the deployment layered
 
@@ -25,7 +45,7 @@ here.
 | --- | --- | --- |
 | [Base](../container/README.md) | Tiny File Manager, fixed data root, and local storage | Yes |
 | TLS and sign-on | HAProxy TCP pass-through, Apache TLS, Kerberos authentication, and an exact user allowlist | Yes |
-| AFS | Delegated user credential, PAG and token lifecycle, host AFS mount, and restricted file operations | Prototype; live gate required |
+| AFS | Delegated user credential, PAG and token lifecycle, host AFS mount, and restricted file operations | Option 1 public build; Option 2 public assembly plus private provider; live gate required |
 
 The HAProxy layer can remain unchanged: it passes the original TLS connection
 to Apache. The AFS layer must be a separately named child image and separate
@@ -65,7 +85,10 @@ the entire host `/afs` tree.
 
 ## Choose a credential design
 
-The supplied profile implements Design A. Design B remains an alternative
+Both supplied Compose profiles use Design A. Option 1 contains its complete
+public implementation. Option 2 supplies the offline provider builder,
+application overlay, fragments, and startup preflight but requires the exact
+licensed native RPM closure from the operator. Design B remains an alternative
 architecture, not a supplied deployment mode.
 
 ### Design A: direct browser delegation
@@ -80,7 +103,9 @@ isolation. Apache and in-process PHP share a worker security context, so a PHP
 compromise can read the HTTP keytab and delegated user credentials. Treat that
 as an explicit security-boundary change.
 
-For this profile:
+The following implementation details describe Option 1. Option 2 enforces the
+same credential-isolation goals with the EL9 `apache` account (UID/GID 48) and
+the private provider contract documented in its recipe:
 
 - Add a separately named `afs` target derived from the Dockerfile's `common`
   stage, or an equivalently pinned image. Do not derive from the `gssapi`
@@ -181,7 +206,7 @@ insufficient. A proxy-managed credential cache is not a native delegated TGT
 that unmodified `mod_waklog` can consume directly with libkrb5; see the pinned
 [gssproxy credential-storage source](https://github.com/gssapi/gssproxy/blob/675b592d74c66f5fae5285926d00e6d0cec70e43/src/mechglue/gpp_creds.c#L137-L228).
 
-## How the separate AFS image is built
+## How the Option 1 image is built
 
 The supplied image specifically builds against Debian's OpenAFS 1.8.9
 userspace ABI and expects an OpenAFS host Cache Manager. An AuriStorFS server is
@@ -266,6 +291,60 @@ Replace the cell and realm. Do not configure `WaklogDefaultPrincipal` or
 per-user access. Do not rely on `WaklogDisableTokenCache`, which the public
 release labels as unimplemented.
 
+## Option 2 native AuriStor build boundary
+
+Option 2 is not produced by replacing OpenAFS package names or accepting a
+different mount type in the current image. Its public `Dockerfile.auristor`
+overlay consumes a provider base pinned by image digest. A single host may use
+a loopback-only local registry; multiple hosts require an approved private
+registry. Provider-contract version 1 accepts only the
+`yfs-2021.05-71.el9`/`mod_waklog-yfs-2021.05-71.el9` generation on `x86_64` or
+`aarch64`; another release requires a new reviewed contract and attestation.
+
+The generated provider lock machine-checks the two provider NEVRAs, pinned
+PHP and GSSAPI source identities, selected runtime file hashes, and a hash of
+the complete installed RPM-NEVRA manifest. The immutable provider image digest
+binds the final image bytes. The operator must separately retain this build
+provenance in an approved evidence record:
+
+- an exact EL9 base-image digest and architecture;
+- exact AuriStor RPM NEVRAs, repository snapshot, package signatures,
+  checksums, licenses, and authorized recipient scope;
+- the Apache package and module magic number, APR, Kerberos, PHP SAPI, runtime
+  UID, library SONAMEs, and symbol versions;
+- one pinned PHP source build that produces both `/usr/local/bin/php` and the
+  in-process `php_module` with identical version, configuration, and required
+  extensions, using `/usr/local/etc/php/conf.d` for the shared configuration
+  scan path;
+- the exact licensed `mod_waklog-yfs` RPM with provenance, signature,
+  checksum, license record, SBOM, and no RPATH or RUNPATH;
+- the supplied startup probe, which proves entry into a fresh tokenless PAG,
+  the intended cell, the native control endpoint, and absence of inherited
+  tokens; and
+- the exact host kernel/client version, container runtime, capability set, and
+  seccomp profile used for the live tests.
+
+No AuriStor RPM, repository credential or certificate, provider image, or
+extracted library may enter Git, the public Docker build
+context, public CI artifacts or caches, logs, or a public registry. The runtime
+must contain no OpenAFS libraries and must not start a Cache Manager or load a
+kernel module.
+
+The native runtime contract is `/etc/yfs/yfs-client.conf`, a host-managed `yfs`
+Cache Manager, filesystem type `auristorfs`, and the version-1 client's
+`/proc/fs/auristorfs/afs_ioctl` control endpoint. It must reject `afs`, missing
+or mismatched configuration, and an unapproved provider lock. Never bind the
+host's complete `/proc` tree into the container.
+
+Run the PAG probe as the exact Apache worker UID under the final container's
+capability and seccomp settings. Start with the runtime's default seccomp
+profile. If a required AuriStor ioctl or keyring operation is blocked, derive,
+review, and hash-pin the narrowest provider-specific exception. Do not use
+`seccomp=unconfined`, `--privileged`, or speculative capabilities. A build,
+module load, successful `fs` command, or single-user token is not acceptance;
+the deployment remains non-production until the complete two-user live gate
+passes.
+
 ## Preserve the request's PAG
 
 Use Apache's non-threaded `prefork` MPM, HTTP/1.1, and in-process
@@ -302,7 +381,7 @@ Before starting the AFS profile:
 6. Do not run recursive `chown`, `chmod`, or POSIX ACL commands on the AFS
    tree. Configure AFS ACLs with the provider's tools and disposable test data.
 
-The supplied entrypoint verifies an AFS mount is present without traversing
+The supplied Option 1 entrypoint verifies an AFS mount is present without traversing
 protected content or demanding anonymous read/write access, and it checks that
 the mounted cell configuration matches the requested cell. It cannot attest
 the bind's cell or volume from filesystem type alone. The operator must verify
@@ -310,9 +389,17 @@ the exact source with `fs whichcell` and `fs examine` before every start; a
 missing or unmounted source stops the container. Recreate the AFS container
 after a host remount.
 
-The supplied Compose file gives the application ordinary egress in addition to
-the internal HAProxy backend. Before any production use, restrict that egress
-to the required DNS, KDC, PTS, and AFS dependencies with host or network policy.
+The supplied Option 2 entrypoint instead requires `auristorfs`, validates the
+mounted `/etc/yfs/yfs-client.conf`, verifies the locked provider module,
+package inventory, and fragments, and runs the supplied tokenless-PAG preflight
+before Apache starts. It does not accept the Option 1 `afs` mount or
+`/etc/openafs` configuration. The preflight does not replace the live
+two-user/request-cleanup gate.
+
+Both supplied Compose files give the application ordinary egress in addition
+to the internal HAProxy backend. Before any production use, restrict that
+egress to the required DNS, KDC, identity, and AFS dependencies with host or
+network policy.
 Do not expose an application port or mount the AFS path into HAProxy, the TLS
 initializer, or a credential sidecar.
 
@@ -347,9 +434,10 @@ Complete these steps with the AD/Kerberos and AFS administrators:
    `system:anyuser` to make startup pass.
 
 Full delegation places a reusable user credential in a container-private tmpfs
-shared by all UID-33 Apache/PHP workers. Limit access to managed intranet
-clients and treat compromise of one worker as compromise of every live
-delegated credential until it expires.
+shared by every Apache/PHP worker using the provider's service UID (33 for
+Option 1 and 48 for Option 2). Limit access to managed intranet clients and
+treat compromise of one worker as compromise of every live delegated
+credential until it expires.
 
 ## Key rotation is profile-specific
 
@@ -375,8 +463,16 @@ Do not expose diagnostics or use production data during validation.
 
 - Prove the base HAProxy stack first: real Kerberos login, exact allowlist,
   TLS, no Basic/NTLM fallback, and healthy containers.
-- Verify `auth_gssapi`, the reviewed `waklog` module, prefork MPM,
+- Verify `auth_gssapi`, the locked provider-specific `waklog` module, prefork MPM,
   `apache2handler` PHP, and HTTP/1.1 inside the exact image.
+- Verify the selected provider explicitly: Option 1 requires `afs`,
+  `/etc/openafs`, and the locked OpenAFS ABI; Option 2 requires `auristorfs`,
+  `/etc/yfs/yfs-client.conf`, the locked EL9 AuriStor RPM set, and no OpenAFS
+  libraries. A generic "AFS" label is not sufficient.
+- For Option 2, prove the native control path, PAG and token operations under
+  the final worker UID, dropped capabilities, and final seccomp policy. Verify
+  the actual rxkad or yfs-rxgk token and negotiated wire-security level against
+  the approved service policy; do not permit silent downgrade.
 - Verify the host mount and container bind source before every start. A missing
   mount must fail closed; it must not reveal or use the underlying host path.
 - Verify a delegated cache is native, unique, mode 0600, on tmpfs, bound to the
@@ -404,12 +500,13 @@ does not substitute for that deployment-specific validation.
 
 ## Rollback requirements
 
-The AFS profile must have a tested rollback that stops only its
+Each AFS provider must have a tested rollback that stops only its
 containers and recreates the unchanged HAProxy stack from
 `contrib/haproxy/compose.yaml`. It must not use `down -v` or delete host AFS
-data. Keep its image, Compose project, and volumes distinct from the base
-stack, and document the complete Compose-file list for every command so an
-operator cannot silently switch storage backends.
+data. Keep each provider's image, Compose project, configuration, and volumes
+distinct from the base stack and from the other provider. Document the complete
+Compose-file list for every command so an operator cannot silently switch the
+mount type, provider ABI, or storage backend.
 
 ## References
 
@@ -425,5 +522,7 @@ operator cannot silently switch storage backends.
 - [AuriStorFS deployment interoperability matrix](https://www.auristor.com/openafs/migrate-to-auristor/auristor-deployment-strategy)
 - [AuriStorFS `asetkey` documentation](https://www.auristor.com/documentation/man/linux/8/asetkey.html)
 - [AuriStorFS `fs getcrypt` and RxKAD/FCRYPT limits](https://www.auristor.com/documentation/man/linux/1/fs_getcrypt.html)
+- [AuriStorFS client configuration](https://www.auristor.com/documentation/man/linux/5/yfs-client.conf.html)
+- [AuriStorFS `aklog` and yfs-rxgk security levels](https://www.auristor.com/documentation/man/linux/1/aklog.html)
 - [Apache prefork MPM](https://httpd.apache.org/docs/current/en/mod/prefork.html)
 - [Docker bind-mount behavior](https://docs.docker.com/engine/storage/bind-mounts/)
