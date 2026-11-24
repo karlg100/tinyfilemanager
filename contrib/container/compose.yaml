@@ -7,7 +7,10 @@ services:
       context: ../..
       dockerfile: contrib/container/Dockerfile
     init: true
-    restart: unless-stopped
+    # A configuration or permission error exits with status 1; retry only a
+    # few times so the error stays visible in `ps` and `logs` instead of
+    # restarting forever.
+    restart: on-failure:3
     read_only: true
     security_opt:
       - no-new-privileges:true

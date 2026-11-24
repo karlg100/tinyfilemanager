@@ -34,7 +34,9 @@ docker compose -f contrib/container/compose.yaml build
 
 ## Configure
 
-Create the ignored runtime configuration:
+Create the ignored runtime configuration before running any other Compose
+command. `compose.yaml` mounts this file, so Compose refuses to start any
+container, including the password-hash helper below, until it exists.
 
 Linux or macOS:
 
@@ -48,7 +50,8 @@ Windows PowerShell:
 Copy-Item contrib/container/config.php.example contrib/container/config.php
 ```
 
-Generate a password hash without putting the password in the command line:
+Generate a password hash without putting the password in the command line.
+The helper prompts twice and needs an interactive terminal:
 
 ```sh
 docker compose -f contrib/container/compose.yaml run --rm --no-deps --entrypoint tinyfilemanager-hash-password tinyfilemanager
@@ -168,6 +171,19 @@ The named data volume survives `down`. Running `down -v` deletes it.
 
 The built-in healthcheck is PHP/HTTP liveness only; it does not attest login,
 data integrity, or production readiness.
+
+## Troubleshooting
+
+- `bind source path does not exist: …/contrib/container/config.php`: create
+  `config.php` as described in [Configure](#configure), then run the command
+  again.
+- The service shows `exited` or `restarting` right after `up -d`: startup
+  validation failed. Run the applicable `logs` command; each problem is
+  reported on a line starting with `tinyfilemanager:`. For example,
+  `replace the placeholder password hash in config.php` means the generated
+  hash was not pasted in. Correct `config.php`, then run `up -d` again. After a
+  configuration error, Compose retries three times and then leaves the service
+  stopped.
 
 ## Scope
 
